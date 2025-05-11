@@ -1,0 +1,68 @@
+# Go build outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test # Test binaries
+*-debug # Debug binaries
+*.out
+/app # Example if 'app' is a binary output directory
+
+# Go module files (dependencies are managed by go.mod and go.sum)
+/vendor/
+
+# IDE specific files
+# GoLand / IntelliJ
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+logs/
+
+# Environment-specific configuration files (if any that shouldn't be committed)
+# Example: config/config.local.yaml
+# config.development.yaml # 我们当前这个文件是版本控制的，但如果有本地覆盖版本则忽略
+
+# Docker related files to ignore (if any beyond docker-compose.yaml and Dockerfiles)
+# Example: .dockerignore (though .dockerignore itself should often be committed)
+# docker-compose.override.yml (if used for local overrides)
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# Sensitive information (ensure these are not committed)
+# .env # If you use .env files for secrets
+
+# Elasticsearch data (if for some reason it ends up in the project dir, though volumes are external)
+# es_data/ # This is a Docker volume, usually not in project dir but good to be aware
+
+# Kafka data (if for some reason it ends up in the project dir)
+# kafka_data/ # Also a Docker volume
+
+# Specific to your project structure
+# If you have any build output directories for Go, list them:
+# Example: /bin/
+# Example: /build/
+
+# The IK plugin ZIP file we downloaded (as it's a dependency downloaded, not source code)
+elasticsearch_custom/elasticsearch-analysis-ik-8.13.4.zip
+
+# Any executables built by GoLand in temp folders (like the one from your log)
+# This is a more generic way to catch IDE-specific build outputs
+# We can be more specific if we know the exact pattern GoLand uses in its temp run configs
+# For now, the general *.exe above should cover it.
+# If you see specific temp build folders created by GoLand at project root, add them.
+# For example, from your log: C:\Users\许志火\AppData\Local\JetBrains\GoLand2024.3\tmp\GoLand\___go_build_github_com_Xushengqwer_post_search.exe
+# We don't want to ignore AppData, but if GoLand puts build artifacts *in your project directory* we would ignore those.
+# The default *.exe should handle binaries built in the project directory.

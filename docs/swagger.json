@@ -1,0 +1,251 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "contact": {}
+    },
+    "paths": {
+        "/api/v1/_health": {
+            "get": {
+                "description": "检查服务存活状态",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Health"
+                ],
+                "summary": "健康检查",
+                "responses": {
+                    "200": {
+                        "description": "服务存活",
+                        "schema": {
+                            "$ref": "#/definitions/models.SwaggerHealthCheckResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "服务不存活（通常不会发生，除非服务进程已挂）",
+                        "schema": {
+                            "$ref": "#/definitions/models.SwaggerErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/search": {
+            "get": {
+                "description": "根据关键词、分页、排序等条件搜索帖子列表",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Search"
+                ],
+                "summary": "搜索帖子",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "搜索关键词",
+                        "name": "q",
+                        "in": "query"
+                    },
+                    {
+                        "minimum": 1,
+                        "type": "integer",
+                        "default": 1,
+                        "description": "页码 (从1开始)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "maximum": 100,
+                        "minimum": 1,
+                        "type": "integer",
+                        "default": 10,
+                        "description": "每页数量",
+                        "name": "size",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "updated_at",
+                        "description": "排序字段 (例如: updated_at, view_count, _score)",
+                        "name": "sort_by",
+                        "in": "query"
+                    },
+                    {
+                        "enum": [
+                            "asc",
+                            "desc"
+                        ],
+                        "type": "string",
+                        "default": "desc",
+                        "description": "排序顺序 (asc 或 desc)",
+                        "name": "sort_order",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "搜索成功，返回匹配的帖子列表及分页信息。",
+                        "schema": {
+                            "$ref": "#/definitions/models.SwaggerSearchResultResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "请求参数无效，例如页码超出范围或排序字段不支持。",
+                        "schema": {
+                            "$ref": "#/definitions/models.SwaggerErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "服务器内部错误，搜索服务遇到未预期的问题。",
+                        "schema": {
+                            "$ref": "#/definitions/models.SwaggerErrorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "models.EsPostDocument": {
+            "type": "object",
+            "properties": {
+                "author_avatar": {
+                    "description": "作者头像的 URL 或标识符。",
+                    "type": "string"
+                },
+                "author_id": {
+                    "description": "作者的用户 ID。",
+                    "type": "string"
+                },
+                "author_username": {
+                    "description": "作者的用户名。",
+                    "type": "string"
+                },
+                "contact_qr_code": {
+                    "description": "联系二维码的 URL 或标识符。",
+                    "type": "string"
+                },
+                "content": {
+                    "description": "帖子内容。",
+                    "type": "string"
+                },
+                "id": {
+                    "description": "帖子唯一标识符。使用 uint64 以兼容 ES 的 long 或 unsigned_long 类型。",
+                    "type": "integer"
+                },
+                "official_tag": {
+                    "description": "官方标签，直接使用导入的枚举类型（建议在 ES 中存储为整数或映射为 keyword）。",
+                    "type": "integer",
+                    "example": 0
+                },
+                "price_per_unit": {
+                    "description": "每单位价格（如果适用）。",
+                    "type": "number"
+                },
+                "status": {
+                    "description": "帖子状态，直接使用导入的枚举类型（建议在 ES 中存储为整数或映射为 keyword）。",
+                    "type": "integer",
+                    "example": 1
+                },
+                "title": {
+                    "description": "帖子标题。",
+                    "type": "string"
+                },
+                "updated_at": {
+                    "description": "文档在 Elasticsearch 中最后更新的时间戳。",
+                    "type": "string"
+                },
+                "view_count": {
+                    "description": "帖子浏览量。",
+                    "type": "integer"
+                }
+            }
+        },
+        "models.SearchResult": {
+            "type": "object",
+            "properties": {
+                "hits": {
+                    "description": "命中的帖子列表",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.EsPostDocument"
+                    }
+                },
+                "page": {
+                    "description": "当前页码",
+                    "type": "integer"
+                },
+                "size": {
+                    "description": "当前页大小",
+                    "type": "integer"
+                },
+                "took_ms": {
+                    "description": "新增：查询在 Elasticsearch 端执行所花费的时间 (毫秒为单位，转换为 time.Duration)",
+                    "type": "integer",
+                    "example": 50
+                },
+                "total": {
+                    "description": "总命中数",
+                    "type": "integer"
+                }
+            }
+        },
+        "models.SwaggerErrorResponse": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "业务自定义错误码。",
+                    "type": "integer"
+                },
+                "data": {
+                    "description": "错误响应中 data 字段通常为 null 或不包含有效业务数据，这里使用 interface{}。"
+                },
+                "message": {
+                    "description": "错误的文字描述。",
+                    "type": "string"
+                }
+            }
+        },
+        "models.SwaggerHealthCheckResponse": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer"
+                },
+                "data": {
+                    "description": "gin.H 本质上是 map[string]interface{}",
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "message": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.SwaggerSearchResultResponse": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "description": "业务自定义状态码，例如 0 代表成功，其他值代表特定错误。",
+                    "type": "integer"
+                },
+                "data": {
+                    "description": "具体的搜索结果数据负载。使用 omitempty 可以在 Data 为空时不显示该字段。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.SearchResult"
+                        }
+                    ]
+                },
+                "message": {
+                    "description": "操作结果的文字描述，例如 \"搜索成功\" 或具体的错误信息。",
+                    "type": "string"
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,53 @@
+# 服务器配置
+server:
+  listen_addr: "" # 新增：监听地址，例如 ":8080" 或 "0.0.0.0:8080"
+  port: "8080"    # 您应用本地运行时监听的端口
+  requestTimeout: "5s" # 新增：请求超时时间，例如 "5s", "1m"
+
+# Zap 日志配置 (根据共享模块更新)
+zapConfig:
+  level: "debug"    # 日志级别 (例如: "debug", "info", "warn", "error")
+  encoding: "json"   # 编码格式 ("json" 或 "console")
+  # 注意：根据您提供的共享 ZapConfig，以下字段已移除，因为它们不是共享配置的一部分。
+  # K8s 环境下推荐使用 stdout/stderr。
+  # output_path: "stdout"
+  # error_output: "stderr"
+  # max_size: 10
+  # max_age: 7
+  # max_backups: 3
+
+# 分布式追踪配置 (来自 go-common)
+tracerConfig:
+  enabled: true                     # 启用追踪
+  exporter_type: "stdout"           # 开发时用 stdout 最简单，直接打印追踪信息
+  # exporter_type: "otlp_grpc"      # 或者配置为 OTLP gRPC (需要 Collector 运行在 localhost:4317)
+  # exporter_endpoint: "localhost:4317"
+  sampler_type: "parent_based_traceid_ratio" # 推荐的采样策略
+  sampler_param: 1.0                # 开发时 100% 采样
+
+# Kafka 配置
+kafkaConfig:
+  brokers: ["localhost:9092"] # Kafka Broker 地址
+  groupID: "search_service_group" # 消费者组 ID
+  subscribedTopics:                # 新增：消费者组订阅的主题列表
+    - "PostAudit"
+    - "PostDelete"
+    # - "AnotherTopic" # 可以根据需要添加更多主题
+  dlqTopic: "search_service_dlq" # 死信队列主题
+  kafkaVersion: "3.6.0"         # Kafka 集群版本
+  maxRetryAttempts: 3           # 处理消息失败时的最大重试次数 (来自 KafkaConfig 结构体)
+  consumerGroup:
+    sessionTimeoutMs: 30000   # 会话超时时间 (毫秒)
+    autoOffsetReset: "latest"   # 起始消费策略 ("latest" 或 "earliest")
+  producer:
+    acks: "all"                 # 确认级别 ("all", "1", "0")
+    requestTimeout: "10s"       # 同步生产者发送请求的超时时间
+
+# Elasticsearch 配置
+elasticsearchConfig:
+  addresses: ["http://localhost:9200"] # Elasticsearch 地址
+  username: ""                         # 用户名 (如果 Elasticsearch 安全开启)
+  password: ""                         # 密码 (如果 Elasticsearch 安全开启)
+  indexName: "posts_index"             # Elasticsearch 索引名称
+  numberOfShards: 3                    # 新增：主分片数量 (根据你的需求调整)
+  numberOfReplicas: 1                  # 新增：每个主分片的副本数量 (例如，对于生产环境，至少为1)

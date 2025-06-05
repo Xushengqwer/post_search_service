@@ -6,22 +6,22 @@ on:
       - main
 
 env:
-  # GHCR 上的基础镜像名称，不含标签。
-  # github.repository 会提供 "Owner/RepoName" 的格式，GHCR 包名通常与此一致。
-  IMAGE_NAME_BASE: ghcr.io/${{ github.repository }}
-  APP_CONTAINER_PORT: 8083 # 你的 Go 应用在 Docker 容器内监听的端口
+  # GHCR 基础镜像名，不含标签和 owner。owner 会从 github.repository_owner 获取
+  # 仓库名也从 github.event.repository.name 获取，并转换为小写
+  # IMAGE_REPO_NAME: ${{ github.event.repository.name }} # 直接用 github.repository 更简单
+  APP_CONTAINER_PORT: 8083
 
 jobs:
   build-and-push-to-ghcr:
     name: Build and Push to GitHub Container Registry
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
-      packages: write # 允许写入 GitHub Packages (GHCR)
-
-    outputs: # <--- 输出构建好的短 SHA 标签
-      image_tag_sha: ${{ steps.meta.outputs.version }} # 'version' 通常是 metadata-action 基于SHA生成的主要标签
+      packages: write
+    outputs:
+      # 输出主要的版本标签 (通常是短SHA) 和 latest 标签 (如果适用)
+      image_version_tag: ${{ steps.meta.outputs.version }} # 这是主要的、基于SHA的标签
+      image_latest_tag: ${{ steps.meta.outputs.tags_latest }} # 捕获明确的 latest 标签 (如果生成的话)
 
     steps:
       - name: Checkout code
@@ -38,29 +38,39 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Extract metadata (tags, labels) for Docker
-        id: meta # 给这个步骤一个 ID
+        id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME_BASE }} # 使用定义的基础镜像名
+          # images 名称会自动处理为 ghcr.io/owner/repo (owner 和 repo 会保持 GitHub 上的大小写)
+          images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha,prefix=,format=short # 明确使用短SHA作为标签
-            type=raw,value=latest,enable={{is_default_branch}} # 仅在默认分支上打 latest 标签
+            type=sha,format=short,prefix= # 短SHA标签, 例如: abc1234
+            type=raw,value=latest,enable={{is_default_branch}} # latest 标签
 
       - name: Build and push Docker image to GHCR
+        id: build_push # 给这个步骤一个ID，方便引用其输出
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile # 明确指定 Dockerfile 路径
+          file: ./Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }} # 使用 metadata-action 生成的所有标签
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Debug: 输出生成的标签，确认一下
+      - name: Echo Docker metadata
+        run: |
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Version (main tag): ${{ steps.meta.outputs.version }}"
+          echo "Image Digest: ${{ steps.build_push.outputs.digest }}"
+
+
   deploy-to-cvm:
     name: Deploy to Tencent Cloud CVM
     runs-on: ubuntu-latest
-    needs: build-and-push-to-ghcr # 依赖上一个 job 成功完成
+    needs: build-and-push-to-ghcr
 
     steps:
       - name: Deploy to CVM
@@ -70,31 +80,31 @@ jobs:
           username: ${{ secrets.CVM_USERNAME }}
           key: ${{ secrets.CVM_SSH_PRIVATE_KEY }}
           script: |
-            set -e # 如果任何命令失败，则立即退出脚本
+            set -e
 
-            # 从上一个 job (build-and-push-to-ghcr) 的 outputs 中获取短 SHA 标签
-            export IMAGE_TAG_SHA_FROM_BUILD="${{ needs.build-and-push-to-ghcr.outputs.image_tag_sha }}"
+            # 从构建 job 获取基于 SHA 的短标签
+            export IMAGE_TAG_TO_PULL="${{ needs.build-and-push-to-ghcr.outputs.image_version_tag }}"
 
-            # 构造基础镜像名 (与 build job 中的 IMAGE_NAME_BASE 保持一致)
+            # 构造在 GHCR 上的基础镜像名，并转换为全小写以符合 docker pull 的期望
             # github.repository 的格式是 Owner/RepoName
-            export GHCR_IMAGE_FULL_NAME_BASE="ghcr.io/${{ github.repository }}"
+            export GHCR_IMAGE_BASE_LOWERCASE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
 
-            # 构造要拉取的完整镜像名，使用从构建步骤获取的短 SHA 标签
-            export IMAGE_TO_PULL="${GHCR_IMAGE_FULL_NAME_BASE}:${IMAGE_TAG_SHA_FROM_BUILD}"
+            export IMAGE_TO_PULL_FULL_NAME="${GHCR_IMAGE_BASE_LOWERCASE}:${IMAGE_TAG_TO_PULL}"
 
-            export CONTAINER_NAME="post-search-app" # 你想给容器起的名字
-            export HOST_PORT="80"                   # CVM 上暴露给外部的端口
+            export CONTAINER_NAME="post-search-app"
+            export HOST_PORT="80"
+            # APP_CONTAINER_PORT 是在 workflow 的 env 中定义的，值为 8083
 
-            echo "准备部署镜像: ${IMAGE_TO_PULL}"
-            echo "构建时使用的标签 (短SHA): ${IMAGE_TAG_SHA_FROM_BUILD}"
-            echo "容器内应用端口: ${{ env.APP_CONTAINER_PORT }}"
+            echo "准备部署的精确镜像: ${IMAGE_TO_PULL_FULL_NAME}"
+            echo "使用的标签 (应为短SHA): ${IMAGE_TAG_TO_PULL}"
+            echo "容器内应用端口: ${{ env.APP_CONTAINER_PORT }}" # 在 workflow 级别 env 定义
             echo "CVM主机端口: ${HOST_PORT}"
 
             echo "登录 GHCR..."
             docker login ghcr.io -u ${{ secrets.CVM_GH_USERNAME }} -p ${{ secrets.GHCR_PAT_FOR_CVM }}
 
-            echo "拉取镜像: ${IMAGE_TO_PULL}"
-            docker pull ${IMAGE_TO_PULL}
+            echo "拉取镜像: ${IMAGE_TO_PULL_FULL_NAME}"
+            docker pull ${IMAGE_TO_PULL_FULL_NAME}
 
             echo "停止并删除旧容器 (如果存在)..."
             docker stop ${CONTAINER_NAME} || true
@@ -104,8 +114,7 @@ jobs:
             docker run -d \
               -p ${HOST_PORT}:${{ env.APP_CONTAINER_PORT }} \
               --name ${CONTAINER_NAME} \
-              ${IMAGE_TO_PULL}
-              # 注意：关于配置文件和依赖服务 (Kafka, ES) 的问题我们后续处理
+              ${IMAGE_TO_PULL_FULL_NAME}
 
             echo "清理旧镜像..."
             docker image prune -af

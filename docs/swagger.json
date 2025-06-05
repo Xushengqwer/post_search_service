@@ -1,28 +1,55 @@
 {
+    "schemes": [
+        "http",
+        "https",
+        "",
+        "//",
+        "根据您的服务支持情况调整"
+    ],
     "swagger": "2.0",
     "info": {
-        "contact": {}
+        "description": "这是帖子搜索服务的 API 文档。它允许搜索从 Kafka 事件中索引的帖子。",
+        "title": "帖子搜索服务 API",
+        "termsOfService": "http://swagger.io/terms/",
+        "contact": {},
+        "license": {
+            "name": "Apache 2.0",
+            "url": "http://www.apache.org/licenses/LICENSE-2.0.html"
+        },
+        "version": "1.0.0"
     },
+    "host": "localhost:8083 // 请根据您的实际配置修改",
     "paths": {
-        "/api/v1/_health": {
+        "/api/v1/search/hot-terms": {
             "get": {
-                "description": "检查服务存活状态",
+                "description": "返回最流行或最近搜索词的列表。",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
-                    "Health"
+                    "Search"
                 ],
-                "summary": "健康检查",
+                "summary": "获取热门搜索词",
+                "parameters": [
+                    {
+                        "maximum": 50,
+                        "minimum": 1,
+                        "type": "integer",
+                        "default": 10,
+                        "description": "返回的热门搜索词数量",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
-                        "description": "服务存活",
+                        "description": "成功，返回热门搜索词列表。",
                         "schema": {
-                            "$ref": "#/definitions/models.SwaggerHealthCheckResponse"
+                            "$ref": "#/definitions/models.SwaggerHotSearchTermsResponse"
                         }
                     },
-                    "503": {
-                        "description": "服务不存活（通常不会发生，除非服务进程已挂）",
+                    "500": {
+                        "description": "服务器内部错误，无法获取热门搜索词。",
                         "schema": {
                             "$ref": "#/definitions/models.SwaggerErrorResponse"
                         }
@@ -30,7 +57,7 @@
                 }
             }
         },
-        "/api/v1/search": {
+        "/api/v1/search/search": {
             "get": {
                 "description": "根据关键词、分页、排序等条件搜索帖子列表",
                 "consumes": [
@@ -125,17 +152,37 @@
                     "description": "作者的用户名。",
                     "type": "string"
                 },
-                "contact_qr_code": {
-                    "description": "联系二维码的 URL 或标识符。",
+                "contact_info": {
+                    "description": "联系方式",
                     "type": "string"
                 },
                 "content": {
                     "description": "帖子内容。",
                     "type": "string"
                 },
+                "created_at": {
+                    "type": "integer"
+                },
+                "highlights": {
+                    "description": "新增：用于存储高亮片段的字段\n键是字段名 (如 \"title\", \"content\")，值是包含高亮HTML片段的字符串切片。\nomitempty 表示如果 Highlights 为 nil 或空 map，则在JSON序列化时忽略此字段。\n我们不在 _source 中存储这个字段，它是由 Elasticsearch 在查询时动态生成的。\n因此，不需要 `json:\"-\"` 标签来阻止它被 Elasticsearch 索引，\n但在API响应中我们希望包含它，所以使用 `json:\"highlights,omitempty\"`。",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
                 "id": {
                     "description": "帖子唯一标识符。使用 uint64 以兼容 ES 的 long 或 unsigned_long 类型。",
                     "type": "integer"
+                },
+                "images": {
+                    "description": "图片列表",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.ImageEventData"
+                    }
                 },
                 "official_tag": {
                     "description": "官方标签，直接使用导入的枚举类型（建议在 ES 中存储为整数或映射为 keyword）。",
@@ -165,6 +212,36 @@
                 }
             }
         },
+        "models.HotSearchTerm": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "description": "搜索词的频率计数，omitempty表示如果为0则不在JSON中显示，可选",
+                    "type": "integer"
+                },
+                "term": {
+                    "description": "搜索词本身",
+                    "type": "string"
+                }
+            }
+        },
+        "models.ImageEventData": {
+            "type": "object",
+            "properties": {
+                "display_order": {
+                    "description": "Display order of the image (optional)",
+                    "type": "integer"
+                },
+                "image_url": {
+                    "description": "Publicly accessible URL of the image",
+                    "type": "string"
+                },
+                "object_key": {
+                    "description": "Key of the image in object storage (optional, if consumers need it)",
+                    "type": "string"
+                }
+            }
+        },
         "models.SearchResult": {
             "type": "object",
             "properties": {
@@ -184,7 +261,7 @@
                     "type": "integer"
                 },
                 "took_ms": {
-                    "description": "新增：查询在 Elasticsearch 端执行所花费的时间 (毫秒为单位，转换为 time.Duration)",
+                    "description": "UPRAVENO: Doba trvání dotazu v milisekundách (typ int64)",
                     "type": "integer",
                     "example": 50
                 },
@@ -210,18 +287,23 @@
                 }
             }
         },
-        "models.SwaggerHealthCheckResponse": {
+        "models.SwaggerHotSearchTermsResponse": {
             "type": "object",
             "properties": {
                 "code": {
+                    "description": "业务自定义状态码，例如 0 代表成功，其他值代表特定错误。",
                     "type": "integer"
                 },
                 "data": {
-                    "description": "gin.H 本质上是 map[string]interface{}",
-                    "type": "object",
-                    "additionalProperties": true
+                    "description": "告诉前端哪些词是热门的。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.HotSearchTerm"
+                        }
+                    ]
                 },
                 "message": {
+                    "description": "操作结果的文字描述，例如 \"搜索成功\" 或具体的错误信息。",
                     "type": "string"
                 }
             }

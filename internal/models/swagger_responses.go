@@ -29,3 +29,9 @@ type SwaggerHealthCheckResponse struct {
 // 注意：你需要确保上面这些 SwaggerXXXResponse 结构体的字段 (Code, Message, Data, Success, TraceID)
 // 与你项目中 `github.com/Xushengqwer/gateway/pkg/response` 包实际生成的 JSON 字段名和结构一致。
 // 如果不一致，你需要调整这里的字段名和 JSON 标签。
+
+type SwaggerHotSearchTermsResponse struct {
+	Code    int           `json:"code"`           // 业务自定义状态码，例如 0 代表成功，其他值代表特定错误。
+	Message string        `json:"message"`        // 操作结果的文字描述，例如 "搜索成功" 或具体的错误信息。
+	Data    HotSearchTerm `json:"data,omitempty"` // 告诉前端哪些词是热门的。
+}

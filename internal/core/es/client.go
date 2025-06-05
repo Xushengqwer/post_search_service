@@ -2,15 +2,15 @@ package es
 
 import (
 	"context"
-	"encoding/json" // 用于解析 Elasticsearch 的错误响应
+	"encoding/json"
 	"fmt"
-	"io" // 用于读取响应体
+	"io"
 	"net/http"
-	"strings" // 用于 strings.NewReader
+	"strings"
 	"time"
 
-	"github.com/Xushengqwer/go-common/core"     // 假设这是你的日志库路径
-	"github.com/Xushengqwer/post_search/config" // 假设这是你的配置包路径
+	"github.com/Xushengqwer/go-common/core"
+	"github.com/Xushengqwer/post_search/config" // 确保导入了更新后的 config 包
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
@@ -19,18 +19,16 @@ import (
 
 // ESClient 包含初始化后的 Elasticsearch 客户端及相关信息
 type ESClient struct {
-	Client    *elasticsearch.Client
-	IndexName string
+	Client          *elasticsearch.Client
+	PrimaryIndexCfg config.IndexSpecificConfig // 存储主索引的配置，方便其他地方引用（如果需要）
+	// HotTermsIndexCfg config.IndexSpecificConfig // 热门搜索词索引的配置也可以在这里存储，或者直接在 main.go 中传递给其仓库
 }
 
-// getPostsIndexMapping 定义了 posts_index 的映射和设置。
-// 注意: 对于中文内容，title 和 content 字段的 analyzer 已调整为 "ik_smart"。
-// 你需要确保 Elasticsearch 中已安装并配置了相应的中文分词器 (例如 IK Analyzer)。
-// numberOfShards: 主分片数量。在索引创建后不可更改。
-// numberOfReplicas: 每个主分片的副本数量。可以动态调整。
-func getPostsIndexMapping(numberOfShards, numberOfReplicas int) string {
-	// 为了避免 JSON 注入或格式问题，确保 numberOfShards 和 numberOfReplicas 是整数。
-	// 在实际使用中，这些值应来自配置，并在传入前进行验证。
+// getPostsIndexMapping 定义了主帖子索引的映射和设置。
+// 参数:
+//   - shards: 主分片数量。
+//   - replicas: 每个主分片的副本数量。
+func getPostsIndexMapping(shards int, replicas int) string {
 	return fmt.Sprintf(`{
        "settings": {
           "number_of_shards": %d,
@@ -39,8 +37,8 @@ func getPostsIndexMapping(numberOfShards, numberOfReplicas int) string {
        "mappings": {
           "properties": {
              "id": { "type": "unsigned_long" },
-             "title": { "type": "text", "analyzer": "ik_smart" }, 
-             "content": { "type": "text", "analyzer": "ik_smart" }, 
+             "title": { "type": "text", "analyzer": "ik_smart" },
+             "content": { "type": "text", "analyzer": "ik_smart" },
              "author_id": { "type": "keyword" },
              "author_avatar": { "type": "keyword", "index": false },
              "author_username": {
@@ -58,23 +56,154 @@ func getPostsIndexMapping(numberOfShards, numberOfReplicas int) string {
              "updated_at": { "type": "date" }
           }
        }
-    }`, numberOfShards, numberOfReplicas)
+    }`, shards, replicas)
+}
+
+// getHotSearchTermsIndexMapping 定义了热门搜索词索引的映射和设置。
+// 参数:
+//   - shards: 主分片数量。
+//   - replicas: 每个主分片的副本数量。
+func getHotSearchTermsIndexMapping(shards int, replicas int) string {
+	return fmt.Sprintf(`{
+        "settings": {
+            "number_of_shards": %d,
+            "number_of_replicas": %d
+        },
+        "mappings": {
+            "properties": {
+                "term": { "type": "keyword" },
+                "count": { "type": "long" },
+                "last_searched_at": { "type": "date" }
+            }
+        }
+    }`, shards, replicas)
+}
+
+// createIndexIfNotExists 是一个辅助函数，用于检查索引是否存在，如果不存在则创建它。
+func createIndexIfNotExists(
+	ctx context.Context,
+	esClient *elasticsearch.Client,
+	indexCfg config.IndexSpecificConfig,
+	mappingFunc func(shards, replicas int) string,
+	logger *core.ZapLogger,
+	indexLogicalName string, // 用于日志记录的逻辑名称，例如 "主帖子" 或 "热门搜索词"
+) error {
+	// 验证配置
+	if indexCfg.Name == "" {
+		logger.Error(fmt.Sprintf("未配置%s索引的名称 (indexCfg.Name 为空)", indexLogicalName))
+		return fmt.Errorf("%s索引名称未在配置中指定", indexLogicalName)
+	}
+	if indexCfg.NumberOfShards <= 0 {
+		logger.Error(fmt.Sprintf("%s索引的分片数配置无效，必须大于0", indexLogicalName),
+			zap.String("index_name", indexCfg.Name),
+			zap.Int("configured_shards", indexCfg.NumberOfShards),
+		)
+		return fmt.Errorf("%s索引 '%s' 配置的分片数无效: %d，必须大于0", indexLogicalName, indexCfg.Name, indexCfg.NumberOfShards)
+	}
+	if indexCfg.NumberOfReplicas < 0 {
+		logger.Error(fmt.Sprintf("%s索引的副本数配置无效，必须大于或等于0", indexLogicalName),
+			zap.String("index_name", indexCfg.Name),
+			zap.Int("configured_replicas", indexCfg.NumberOfReplicas),
+		)
+		return fmt.Errorf("%s索引 '%s' 配置的副本数无效: %d，必须大于或等于0", indexLogicalName, indexCfg.Name, indexCfg.NumberOfReplicas)
+	}
+
+	checkCtx, checkCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer checkCancel()
+
+	existsRes, err := esClient.Indices.Exists(
+		[]string{indexCfg.Name},
+		esClient.Indices.Exists.WithContext(checkCtx),
+	)
+	if err != nil {
+		logger.Error(fmt.Sprintf("检查%s索引是否存在时发生网络或请求错误", indexLogicalName),
+			zap.String("index_name", indexCfg.Name), zap.Error(err))
+		return fmt.Errorf("检查%s索引 '%s' 是否存在失败: %w", indexLogicalName, indexCfg.Name, err)
+	}
+	defer existsRes.Body.Close()
+
+	if existsRes.StatusCode == 404 { // 索引不存在
+		logger.Warn(fmt.Sprintf("%s索引不存在，将尝试创建...", indexLogicalName),
+			zap.String("index_name", indexCfg.Name),
+			zap.Int("shards", indexCfg.NumberOfShards),
+			zap.Int("replicas", indexCfg.NumberOfReplicas),
+		)
+
+		mapping := mappingFunc(indexCfg.NumberOfShards, indexCfg.NumberOfReplicas)
+		createCtx, createCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer createCancel()
+
+		createReq := esapi.IndicesCreateRequest{
+			Index: indexCfg.Name,
+			Body:  strings.NewReader(mapping),
+		}
+		createRes, err := createReq.Do(createCtx, esClient)
+		if err != nil {
+			logger.Error(fmt.Sprintf("发送创建%s索引请求失败", indexLogicalName),
+				zap.String("index_name", indexCfg.Name), zap.Error(err))
+			return fmt.Errorf("发送创建%s索引 '%s' 请求失败: %w", indexLogicalName, indexCfg.Name, err)
+		}
+		defer createRes.Body.Close()
+
+		if createRes.IsError() {
+			var errorBody strings.Builder
+			var parsedError map[string]interface{}
+			bodyBytes, _ := io.ReadAll(createRes.Body)
+			errorBody.Write(bodyBytes)
+			if jsonErr := json.Unmarshal(bodyBytes, &parsedError); jsonErr == nil {
+				logger.Error(fmt.Sprintf("创建%s索引失败", indexLogicalName),
+					zap.String("index_name", indexCfg.Name),
+					zap.String("status", createRes.Status()),
+					zap.Any("es_error_details", parsedError),
+				)
+			} else {
+				logger.Error(fmt.Sprintf("创建%s索引失败，且无法解析JSON错误响应", indexLogicalName),
+					zap.String("index_name", indexCfg.Name),
+					zap.String("status", createRes.Status()),
+					zap.String("raw_response", errorBody.String()),
+					zap.Error(jsonErr),
+				)
+			}
+			return fmt.Errorf("创建%s索引 '%s' 失败, 状态码: %s, 响应: %s", indexLogicalName, indexCfg.Name, createRes.Status(), errorBody.String())
+		}
+		logger.Info(fmt.Sprintf("成功创建%s索引及映射", indexLogicalName),
+			zap.String("index_name", indexCfg.Name),
+			zap.Int("shards_created", indexCfg.NumberOfShards),
+			zap.Int("replicas_created", indexCfg.NumberOfReplicas),
+		)
+	} else if existsRes.IsError() { // 检查索引请求返回了其他错误
+		var errorBody strings.Builder
+		if _, readErr := io.Copy(&errorBody, existsRes.Body); readErr != nil {
+			logger.Error(fmt.Sprintf("检查%s索引存在性时出错，且无法读取错误响应体", indexLogicalName),
+				zap.String("index_name", indexCfg.Name),
+				zap.String("status", existsRes.Status()),
+				zap.Error(readErr),
+			)
+		} else {
+			logger.Error(fmt.Sprintf("检查%s索引存在性时出错", indexLogicalName),
+				zap.String("index_name", indexCfg.Name),
+				zap.String("status", existsRes.Status()),
+				zap.String("response", errorBody.String()),
+			)
+		}
+		return fmt.Errorf("检查%s索引 '%s' 存在性时出错: %s", indexLogicalName, indexCfg.Name, existsRes.Status())
+	} else {
+		logger.Info(fmt.Sprintf("%s索引已存在", indexLogicalName), zap.String("index_name", indexCfg.Name))
+	}
+	return nil
 }
 
 // NewESClient 初始化 Elasticsearch 客户端并执行基本检查（Ping 和索引存在性检查）。
-// 如果索引不存在，它会尝试使用配置的分片和副本数创建索引。
+// 如果配置的索引不存在，它会尝试创建它们。
 func NewESClient(cfg config.ESConfig, logger *core.ZapLogger, transport http.RoundTripper) (*ESClient, error) {
-	// 构建 Elasticsearch 客户端配置。
-	esCfg := elasticsearch.Config{
+	esClientCfg := elasticsearch.Config{ // 变量名修改以避免与参数 cfg 冲突
 		Addresses: cfg.Addresses,
 		Username:  cfg.Username,
 		Password:  cfg.Password,
-		Transport: transport, // <--- 使用外部传入的 transport
-		// 根据需要添加其他相关设置，例如：RetryOnStatus, MaxRetries 等。
+		Transport: transport,
 	}
 
-	// 创建新的 Elasticsearch 客户端实例。
-	esClient, err := elasticsearch.NewClient(esCfg)
+	esClient, err := elasticsearch.NewClient(esClientCfg)
 	if err != nil {
 		logger.Error("创建 Elasticsearch 客户端失败", zap.Error(err))
 		return nil, fmt.Errorf("创建 Elasticsearch 客户端失败: %w", err)
@@ -84,140 +213,43 @@ func NewESClient(cfg config.ESConfig, logger *core.ZapLogger, transport http.Rou
 	// --- Ping 检查 ---
 	ctxPing, cancelPing := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelPing()
-
 	pingRes, err := esClient.Ping(esClient.Ping.WithContext(ctxPing))
 	if err != nil {
 		logger.Error("Ping Elasticsearch 失败", zap.Error(err))
 		return nil, fmt.Errorf("ping Elasticsearch 失败: %w", err)
 	}
 	defer pingRes.Body.Close()
-
 	if pingRes.IsError() {
 		var errorBody strings.Builder
 		if _, readErr := io.Copy(&errorBody, pingRes.Body); readErr != nil {
-			logger.Error("Elasticsearch Ping 不成功，且无法读取错误响应体",
-				zap.String("status", pingRes.Status()),
-				zap.Error(readErr),
-			)
+			logger.Error("Elasticsearch Ping 不成功，且无法读取错误响应体", zap.String("status", pingRes.Status()), zap.Error(readErr))
 		} else {
-			logger.Error("Elasticsearch Ping 不成功",
-				zap.String("status", pingRes.Status()),
-				zap.String("response", errorBody.String()),
-			)
+			logger.Error("Elasticsearch Ping 不成功", zap.String("status", pingRes.Status()), zap.String("response", errorBody.String()))
 		}
 		return nil, fmt.Errorf("elasticsearch Ping 不成功: %s", pingRes.Status())
 	}
 	logger.Info("Elasticsearch 客户端连接成功 (Ping 成功)", zap.String("status", pingRes.Status()))
 
-	// --- 索引检查与创建 ---
-	ctxIndexCheck, cancelIndexCheck := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelIndexCheck()
+	// 使用后台上下文进行索引创建，因为这通常是启动过程的一部分
+	backgroundCtx := context.Background()
 
-	// 1. 检查索引是否存在
-	existsRes, err := esClient.Indices.Exists(
-		[]string{cfg.IndexName},
-		esClient.Indices.Exists.WithContext(ctxIndexCheck),
-	)
+	// --- 检查并创建主帖子索引 ---
+	err = createIndexIfNotExists(backgroundCtx, esClient, cfg.PrimaryIndex, getPostsIndexMapping, logger, "主帖子")
 	if err != nil {
-		logger.Error("检查索引是否存在时发生网络或请求错误",
-			zap.String("index_name", cfg.IndexName),
-			zap.Error(err),
-		)
-		return nil, fmt.Errorf("检查索引 '%s' 是否存在失败: %w", cfg.IndexName, err)
-	}
-	defer existsRes.Body.Close()
-
-	if existsRes.StatusCode == 404 { // 索引不存在
-		logger.Warn("目标索引不存在，将尝试创建...",
-			zap.String("index_name", cfg.IndexName),
-			zap.Int("configured_shards", cfg.NumberOfShards),
-			zap.Int("configured_replicas", cfg.NumberOfReplicas),
-		)
-
-		// 2. 定义并创建索引
-		// 使用从配置中读取的分片和副本数
-		if cfg.NumberOfShards <= 0 {
-			logger.Error("无效的分片数配置，必须大于0", zap.Int("configured_shards", cfg.NumberOfShards))
-			return nil, fmt.Errorf("配置的分片数无效: %d，必须大于0", cfg.NumberOfShards)
-		}
-		if cfg.NumberOfReplicas < 0 {
-			logger.Error("无效的副本数配置，必须大于或等于0", zap.Int("configured_replicas", cfg.NumberOfReplicas))
-			return nil, fmt.Errorf("配置的副本数无效: %d，必须大于或等于0", cfg.NumberOfReplicas)
-		}
-
-		mapping := getPostsIndexMapping(cfg.NumberOfShards, cfg.NumberOfReplicas)
-		createCtx, createCancel := context.WithTimeout(context.Background(), 10*time.Second) // 给创建操作更长的超时
-		defer createCancel()
-
-		createReq := esapi.IndicesCreateRequest{
-			Index: cfg.IndexName,
-			Body:  strings.NewReader(mapping),
-		}
-		createRes, err := createReq.Do(createCtx, esClient)
-		if err != nil {
-			logger.Error("发送创建索引请求失败",
-				zap.String("index_name", cfg.IndexName),
-				zap.Error(err),
-			)
-			return nil, fmt.Errorf("发送创建索引 '%s' 请求失败: %w", cfg.IndexName, err)
-		}
-		defer createRes.Body.Close()
-
-		if createRes.IsError() {
-			var errorBody strings.Builder
-			var parsedError map[string]interface{}
-			// 注意：在生产代码中，应妥善处理 io.ReadAll 可能返回的错误
-			bodyBytes, _ := io.ReadAll(createRes.Body)
-			errorBody.Write(bodyBytes)
-
-			if err := json.Unmarshal(bodyBytes, &parsedError); err == nil {
-				logger.Error("创建索引失败",
-					zap.String("index_name", cfg.IndexName),
-					zap.String("status", createRes.Status()),
-					zap.Any("es_error_details", parsedError),
-				)
-			} else {
-				logger.Error("创建索引失败，且无法解析JSON错误响应",
-					zap.String("index_name", cfg.IndexName),
-					zap.String("status", createRes.Status()),
-					zap.String("raw_response", errorBody.String()),
-					zap.Error(err), // JSON 解析错误
-				)
-			}
-			return nil, fmt.Errorf("创建索引 '%s' 失败, 状态码: %s, 响应: %s", cfg.IndexName, createRes.Status(), errorBody.String())
-		}
-		logger.Info("成功创建索引及映射",
-			zap.String("index_name", cfg.IndexName),
-			zap.Int("shards_created", cfg.NumberOfShards),
-			zap.Int("replicas_created", cfg.NumberOfReplicas),
-		)
-
-	} else if existsRes.IsError() { // 检查索引请求返回了其他错误
-		var errorBody strings.Builder
-		if _, readErr := io.Copy(&errorBody, existsRes.Body); readErr != nil {
-			logger.Error("检查索引存在性时出错，且无法读取错误响应体",
-				zap.String("index_name", cfg.IndexName),
-				zap.String("status", existsRes.Status()),
-				zap.Error(readErr),
-			)
-		} else {
-			logger.Error("检查索引存在性时出错",
-				zap.String("index_name", cfg.IndexName),
-				zap.String("status", existsRes.Status()),
-				zap.String("response", errorBody.String()),
-			)
-		}
-		return nil, fmt.Errorf("检查索引 '%s' 存在性时出错: %s", cfg.IndexName, existsRes.Status())
-	} else {
-		// 索引已存在
-		logger.Info("目标索引已存在", zap.String("index_name", cfg.IndexName))
-		// （可选）可以在这里添加逻辑来检查现有索引的设置/映射是否与期望的一致，
-		// 但这会增加复杂性。通常，如果服务期望特定的映射，则在索引不存在时创建它是主要目标。
+		return nil, err // 如果创建主索引失败，则直接返回错误
 	}
 
-	// 返回初始化成功的客户端信息
+	// --- 检查并创建热门搜索词索引 ---
+	err = createIndexIfNotExists(backgroundCtx, esClient, cfg.HotTermsIndex, getHotSearchTermsIndexMapping, logger, "热门搜索词")
+	if err != nil {
+		// 如果创建热门搜索词索引失败，也返回错误。
+		// 或者，您可以根据业务需求决定是否将其视为致命错误。
+		// 例如，如果热门搜索词是可选功能，可以只记录警告。但通常最好是失败。
+		return nil, err
+	}
+
 	return &ESClient{
-		Client:    esClient,
-		IndexName: cfg.IndexName,
+		Client:          esClient,
+		PrimaryIndexCfg: cfg.PrimaryIndex, // 存储主索引配置
 	}, nil
 }

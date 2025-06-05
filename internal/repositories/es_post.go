@@ -277,110 +277,91 @@ func (repo *esPostRepository) DeletePost(ctx context.Context, postID uint64) err
 }
 
 // SearchPosts 根据提供的搜索请求在 Elasticsearch 索引中执行查询。
+// 此方法现在会尝试解析高亮结果。
 func (repo *esPostRepository) SearchPosts(ctx context.Context, req models.SearchRequest) (*models.SearchResult, error) {
-	repo.logger.Info("开始执行 Elasticsearch 搜索",
+	repo.logger.Info("开始执行 Elasticsearch 搜索 (包含高亮请求)", // 日志更新
 		zap.String("query_keywords", req.Query),
 		zap.Int("page", req.Page),
 		zap.Int("size", req.Size),
 		zap.String("sort_by", req.SortBy),
 		zap.String("sort_order", req.SortOrder),
-		// 记录过滤条件 (如果存在)
 		zap.String("filter_author_id", req.AuthorID),
-		zap.Any("filter_status", req.Status), // Status 是指针，直接记录可能为 nil
+		zap.Any("filter_status", req.Status),
 	)
 
-	// 1. 构建查询 DSL
-	// 调用之前定义的 buildSearchQuery 函数来生成 Elasticsearch 查询的 JSON 体。
-	// buildSearchQuery 内部封装了分页、排序、主查询（match_all 或 multi_match）和过滤逻辑。
-	queryJSON, err := buildSearchQuery(req) // 假设 buildSearchQuery 已更新以处理过滤
+	queryJSON, err := buildSearchQuery(req) // buildSearchQuery 现在会加入 highlight 部分
 	if err != nil {
-		repo.logger.Error("构建 Elasticsearch 搜索查询 DSL 失败",
-			zap.Any("search_request_params", req), // 记录原始搜索请求参数，便于调试
-			zap.Error(err),
-		)
+		repo.logger.Error("构建 Elasticsearch 搜索查询 DSL 失败", zap.Any("search_request_params", req), zap.Error(err))
 		return nil, fmt.Errorf("构建搜索查询失败: %w", err)
 	}
-	// 在 Debug 级别记录完整的查询 DSL，这对于调试查询逻辑非常有用。
-	// 注意：在生产环境中，如果查询体可能很大或包含敏感信息，应谨慎记录或进行脱敏。
-	repo.logger.Debug("构建的 Elasticsearch 查询 DSL", zap.String("dsl_query", string(queryJSON)))
+	repo.logger.Debug("构建的 Elasticsearch 查询 DSL (含高亮)", zap.String("dsl_query", string(queryJSON))) // 日志更新
 
-	// 2. 执行搜索请求
 	searchReq := esapi.SearchRequest{
-		Index:          []string{repo.indexName},   // 指定要查询的索引。
-		Body:           bytes.NewReader(queryJSON), // 查询 DSL 作为请求体。
-		TrackTotalHits: true,                       // 确保返回精确的总命中数，即使结果集很大。
-		// 其他参数如 Size, From, Sort 通常已在 queryJSON (DSL) 中定义。
+		Index:          []string{repo.indexName},
+		Body:           bytes.NewReader(queryJSON),
+		TrackTotalHits: true,
 	}
 
 	res, err := searchReq.Do(ctx, repo.client)
 	if err != nil {
-		repo.logger.Error("执行 Elasticsearch 搜索请求时发生连接或客户端错误",
-			zap.String("query_keywords", req.Query),
-			zap.Error(err),
-		)
+		repo.logger.Error("执行 Elasticsearch 搜索请求时发生连接或客户端错误", zap.String("query_keywords", req.Query), zap.Error(err))
 		return nil, fmt.Errorf("Elasticsearch 搜索请求失败: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.IsError() {
-		// 如果 Elasticsearch 返回了错误状态码。
-		return nil, repo.logAndWrapESError(res, "搜索文档", req.Query) // 使用查询关键词作为日志上下文
+		return nil, repo.logAndWrapESError(res, "搜索文档", req.Query)
 	}
 
 	// 3. 解析成功的响应
-	// 定义一个临时的匿名结构体来精确匹配 Elasticsearch 搜索响应的结构，特别是 hits 部分。
+	// 更新临时的匿名结构体以包含 highlight 字段
 	var esResponse struct {
-		Took int `json:"took"` // 查询在 Elasticsearch 端耗时（毫秒）
+		Took int `json:"took"`
 		Hits struct {
 			Total struct {
-				Value    int64  `json:"value"`    // 总命中数
-				Relation string `json:"relation"` // "eq" (精确) 或 "gte" (大于等于，如果 track_total_hits 未设或结果过多)
+				Value    int64  `json:"value"`
+				Relation string `json:"relation"`
 			} `json:"total"`
 			Hits []struct {
-				Source models.EsPostDocument `json:"_source"`          // 文档的实际内容
-				Score  float64               `json:"_score,omitempty"` // 文档的相关性评分 (可选)
-			} `json:"hits"` // 实际命中的文档列表
+				Source    models.EsPostDocument `json:"_source"`             // 文档的实际内容
+				Score     float64               `json:"_score,omitempty"`    // 文档的相关性评分 (可选)
+				Highlight map[string][]string   `json:"highlight,omitempty"` // 新增：用于接收高亮结果
+			} `json:"hits"`
 		} `json:"hits"`
-		// Aggregations json.RawMessage `json:"aggregations,omitempty"` // 如果查询中包含聚合，可以在这里解析
 	}
 
-	// 解码响应体到上面定义的结构中。
 	if err := json.NewDecoder(res.Body).Decode(&esResponse); err != nil {
-		repo.logger.Error("解码 Elasticsearch 搜索响应体失败",
-			zap.String("query_keywords", req.Query),
-			zap.Error(err),
-		)
-		// 尝试读取原始响应体以供调试，如果解码失败
-		// 注意：NewDecoder 可能已经消耗了 res.Body，所以这里可能读不到。
-		// 更稳妥的做法是在解码前先将 res.Body 完整读入一个 buffer，然后用这个 buffer 解码。
-		// 但这会增加内存开销，通常只有在调试时才这么做。
+		repo.logger.Error("解码 Elasticsearch 搜索响应体失败", zap.String("query_keywords", req.Query), zap.Error(err))
 		return nil, fmt.Errorf("解码 Elasticsearch 搜索响应失败: %w", err)
 	}
 
 	// 4. 映射到应用程序的结果模型 (models.SearchResult)
-	// 将从 Elasticsearch 返回的数据转换为服务定义的标准 SearchResult 结构。
 	searchResult := &models.SearchResult{
-		Hits:  make([]models.EsPostDocument, 0, len(esResponse.Hits.Hits)), // 初始化 Hits 切片并预设容量以提高效率
+		Hits:  make([]models.EsPostDocument, 0, len(esResponse.Hits.Hits)),
 		Total: esResponse.Hits.Total.Value,
 		Page:  req.Page,
 		Size:  req.Size,
-		Took:  int64(esResponse.Took), // 将毫秒转换
-	}
-	for _, hit := range esResponse.Hits.Hits {
-		// hit.Source 就是 models.EsPostDocument 类型，直接附加。
-		// 如果需要在 SearchResult 的每个 Hit 中包含 _score，需要在 EsPostDocument 或新的 Hit 结构中添加 Score 字段，
-		// 并在这里进行赋值: hit.Source.Score = hit.Score (假设 EsPostDocument 有 Score 字段)。
-		searchResult.Hits = append(searchResult.Hits, hit.Source)
+		Took:  int64(esResponse.Took),
 	}
 
-	repo.logger.Info("Elasticsearch 搜索成功完成",
-		zap.Int64("query_took_ms", searchResult.Took), // 使用转换后的 time.Duration
+	for _, hit := range esResponse.Hits.Hits {
+		doc := hit.Source // 从 _source 获取文档主体
+		// 新增：如果存在高亮结果，则将其赋值给文档的 Highlights 字段
+		if hit.Highlight != nil && len(hit.Highlight) > 0 {
+			doc.Highlights = hit.Highlight
+			repo.logger.Debug("为文档附加了高亮片段", zap.Uint64("doc_id", doc.ID), zap.Any("highlights", doc.Highlights))
+		}
+		searchResult.Hits = append(searchResult.Hits, doc)
+	}
+
+	repo.logger.Info("Elasticsearch 搜索成功完成 (含高亮处理)", // 日志更新
+		zap.Int64("query_took_ms", searchResult.Took),
 		zap.Int64("total_hits_found", searchResult.Total),
 		zap.Int("returned_hits_count", len(searchResult.Hits)),
-		zap.String("total_hits_relation", esResponse.Hits.Total.Relation), // "eq" 表示精确，"gte" 表示至少这么多
+		zap.String("total_hits_relation", esResponse.Hits.Total.Relation),
 		zap.Int("requested_page", req.Page),
 		zap.Int("requested_size", req.Size),
-		zap.String("query_keywords", req.Query), // 再次记录查询关键词，便于关联日志
+		zap.String("query_keywords", req.Query),
 	)
 
 	return searchResult, nil

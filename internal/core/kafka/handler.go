@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/IBM/sarama" // 或 Shopify/sarama
 	"github.com/Xushengqwer/go-common/core"
-	"github.com/Xushengqwer/post_search/internal/models"
+	"github.com/cenkalti/backoff/v4"
 	"go.uber.org/zap"
 
-	"github.com/IBM/sarama"
-	"github.com/cenkalti/backoff/v4"
+	"github.com/Xushengqwer/go-common/models/kafkaevents"
 )
 
 // Handler 实现了 sarama.ConsumerGroupHandler 接口，负责处理从 Kafka 接收到的消息。
@@ -41,19 +41,19 @@ type MessageHandlerFunc func(ctx context.Context, message *sarama.ConsumerMessag
 //   - eventSvc: 业务事件服务 (*EventService) 的实例。
 //   - producer: 用于发送到 DLQ 的 sarama.SyncProducer 实例。
 //   - dlqTopic: 死信队列的主题名称。
-//   - auditTopic: 帖子审计事件的主题名称。
-//   - deleteTopic: 帖子删除事件的主题名称。
+//   - auditTopic: 帖子审计事件的主题名称。 (现在对应 kafkaevents.PostApprovedEvent)
+//   - deleteTopic: 帖子删除事件的主题名称。 (现在对应 kafkaevents.PostDeletedEvent)
 //   - logger: *core.ZapLogger 实例。
 //   - maxRetries: 消息处理的最大重试次数。
 //
 // 返回值:
 //   - *Handler: 初始化完成的消息处理程序实例。
 func NewHandler(
-	eventSvc *EventService,
+	eventSvc *EventService, // EventService 的方法签名需要调整以接受新的事件类型
 	producer sarama.SyncProducer,
 	dlqTopic string,
-	auditTopic string,
-	deleteTopic string,
+	auditTopic string, // 这个 Topic 现在对应 PostApprovedEvent
+	deleteTopic string, // 这个 Topic 对应 PostDeletedEvent
 	logger *core.ZapLogger,
 	maxRetries uint64,
 ) *Handler {
@@ -92,8 +92,8 @@ func NewHandler(
 	// 这种映射方式使得 Handler 能够根据消息来源的主题动态选择正确的处理逻辑，
 	// 方便未来扩展新的主题和对应的处理器。
 	h.topicToHandler = map[string]MessageHandlerFunc{
-		auditTopic:  h.handlePostAuditEvent,  // "帖子审计事件" 主题的消息将由 h.handlePostAuditEvent 方法处理。
-		deleteTopic: h.handlePostDeleteEvent, // "帖子删除事件" 主题的消息将由 h.handlePostDeleteEvent 方法处理。
+		auditTopic:  h.handlePostApprovedEvent, // "帖子审计事件" 主题的消息将由 h.handlePostApprovedEvent 方法处理。
+		deleteTopic: h.handlePostDeleteEvent,   // "帖子删除事件" 主题的消息将由 h.handlePostDeleteEvent 方法处理。
 	}
 	logger.Info("Kafka Handler 初始化完成",
 		zap.Strings("subscribed_topics_for_handler", []string{auditTopic, deleteTopic}), // 记录 Handler 实际配置处理的主题
@@ -306,7 +306,7 @@ func (h *Handler) processWithRetry(ctx context.Context, message *sarama.Consumer
 		if err != nil {
 			// 如果处理函数返回错误，判断该错误是否为永久性错误。
 			// 永久性错误（如数据验证失败、反序列化失败）不应重试，因为重试不太可能成功。
-			if isPermanentError(err) {
+			if isPermanentError(err) { // isPermanentError 函数需要保持或调整
 				h.logger.Error("消息处理遇到永久性错误，将停止重试并标记为最终失败",
 					zap.String("topic", message.Topic),
 					zap.Int64("offset", message.Offset),
@@ -353,16 +353,17 @@ func (h *Handler) processWithRetry(ctx context.Context, message *sarama.Consumer
 
 // --- 特定主题的消息处理函数实现 ---
 
-// handlePostAuditEvent 是处理 "帖子审计事件" 主题消息的具体实现。
-// 它负责反序列化消息内容为 models.KafkaPostAuditEvent，然后调用 EventService 进行处理。
-func (h *Handler) handlePostAuditEvent(ctx context.Context, message *sarama.ConsumerMessage) error {
-	var event models.KafkaPostAuditEvent // 准备用于反序列化的事件结构体
+// handlePostApprovedEvent (之前是 handlePostAuditEvent) 是处理 "帖子审计事件" (现在是 "帖子审核通过事件") 主题消息的具体实现。
+// 它负责反序列化消息内容为 kafkaevents.PostApprovedEvent，然后调用 EventService 进行处理。
+func (h *Handler) handlePostApprovedEvent(ctx context.Context, message *sarama.ConsumerMessage) error {
+	// 2. 使用从 common 包导入的 kafkaevents.PostApprovedEvent
+	var event kafkaevents.PostApprovedEvent // 准备用于反序列化的事件结构体
 
-	// 尝试将消息的 Value (字节流) 反序列化为 KafkaPostAuditEvent 结构体。
+	// 尝试将消息的 Value (字节流) 反序列化为 PostApprovedEvent 结构体。
 	if err := json.Unmarshal(message.Value, &event); err != nil {
 		// 反序列化失败通常是由于消息格式不正确或与期望的结构不符。
 		// 这类错误通常是永久性的，因为消息内容本身不太可能在重试时发生变化。
-		h.logger.Error("反序列化 'PostAuditEvent' 消息失败，数据格式可能不正确或与模型不匹配",
+		h.logger.Error("反序列化 'PostApprovedEvent' 消息失败，数据格式可能不正确或与模型不匹配",
 			zap.String("topic", message.Topic),
 			zap.Int64("offset", message.Offset),
 			zap.Int32("partition", message.Partition),
@@ -370,12 +371,14 @@ func (h *Handler) handlePostAuditEvent(ctx context.Context, message *sarama.Cons
 			zap.Error(err),
 		)
 		// 使用 backoff.Permanent 包装错误，以避免不必要的重试。
-		return backoff.Permanent(fmt.Errorf("反序列化 PostAuditEvent 失败 (主题: %s, 偏移量: %d): %w", message.Topic, message.Offset, err))
+		return backoff.Permanent(fmt.Errorf("反序列化 PostApprovedEvent 失败 (主题: %s, 偏移量: %d): %w", message.Topic, message.Offset, err))
 	}
 
-	// 根据用户提供的模型，KafkaPostAuditEvent 没有 EventType 字段，因此移除相关日志。
-	h.logger.Debug("成功反序列化 PostAuditEvent，准备交由 EventService 处理",
-		zap.Uint64("event_post_id", event.ID), // 使用事件中的 ID 进行日志记录
+	// 日志记录更新以反映新的事件结构
+	h.logger.Debug("成功反序列化 PostApprovedEvent，准备交由 EventService 处理",
+		zap.String("event_id", event.EventID),        // 使用 kafkaevents.PostApprovedEvent 的 EventID
+		zap.Uint64("event_post_id", event.Post.ID),   // 从 event.Post.ID 获取帖子 ID
+		zap.Time("event_timestamp", event.Timestamp), // <-- 微调：记录事件时间戳
 		zap.String("topic", message.Topic),
 		zap.Int64("offset", message.Offset),
 	)
@@ -383,13 +386,15 @@ func (h *Handler) handlePostAuditEvent(ctx context.Context, message *sarama.Cons
 	// 调用 EventService 的方法来处理已反序列化的审计事件。
 	// EventService 内部会包含具体的业务逻辑，如数据验证、与 Elasticsearch 交互等。
 	// EventService 返回的错误将被 processWithRetry 进一步判断是否为永久性错误。
-	return h.eventService.HandlePostAuditEvent(ctx, event)
+	// 注意：eventService.HandlePostApprovedEvent 的签名需要接受 *kafkaevents.PostApprovedEvent
+	return h.eventService.HandlePostApprovedEvent(ctx, &event)
 }
 
 // handlePostDeleteEvent 是处理 "帖子删除事件" 主题消息的具体实现。
-// 它负责反序列化消息内容为 models.KafkaPostDeleteEvent，然后调用 EventService 进行处理。
+// 它负责反序列化消息内容为 kafkaevents.PostDeletedEvent，然后调用 EventService 进行处理。
 func (h *Handler) handlePostDeleteEvent(ctx context.Context, message *sarama.ConsumerMessage) error {
-	var event models.KafkaPostDeleteEvent // 准备用于反序列化的事件结构体
+	// 4. 使用从 common 包导入的 kafkaevents.PostDeletedEvent
+	var event kafkaevents.PostDeletedEvent // 准备用于反序列化的事件结构体
 
 	if err := json.Unmarshal(message.Value, &event); err != nil {
 		h.logger.Error("反序列化 'PostDeleteEvent' 消息失败，数据格式可能不正确或与模型不匹配",
@@ -402,94 +407,59 @@ func (h *Handler) handlePostDeleteEvent(ctx context.Context, message *sarama.Con
 		return backoff.Permanent(fmt.Errorf("反序列化 PostDeleteEvent 失败 (主题: %s, 偏移量: %d): %w", message.Topic, message.Offset, err))
 	}
 
-	// 验证操作类型，根据用户模型，KafkaPostDeleteEvent 有 Operation 字段。
-	// 这是业务层面的验证，确保我们只处理期望的 "delete" 操作。
-	expectedOperation := "delete"
-	if event.Operation != expectedOperation {
-		h.logger.Warn("收到的 PostDeleteEvent 操作类型与预期不符，将跳过处理此消息",
-			zap.String("topic", message.Topic),
-			zap.Int64("offset", message.Offset),
-			zap.Int32("partition", message.Partition),
-			zap.Uint64("event_post_id", event.PostID),
-			zap.String("received_operation", event.Operation), // 使用 event.Operation
-			zap.String("expected_operation", expectedOperation),
-		)
-		// 返回 nil 表示此消息被识别为不适用（对于此特定逻辑）并已“处理”完毕（即跳过）。
-		// 它不会被重试，也不会被发送到 DLQ。
-		return nil
-	}
+	// 我们统一的 PostDeletedEvent 不再有 Operation 字段，该信息由 Topic 本身承载。
+	// 此处移除了对 event.Operation 的检查。
 
-	// 根据用户提供的模型，KafkaPostDeleteEvent 没有 EventType 字段。
-	h.logger.Debug("成功反序列化 PostDeleteEvent 并验证通过，准备交由 EventService 处理",
-		zap.Uint64("event_post_id", event.PostID),
-		zap.String("operation_type", event.Operation), // 记录 Operation
+	// 日志记录更新以反映新的事件结构
+	h.logger.Debug("成功反序列化 PostDeleteEvent，准备交由 EventService 处理",
+		zap.String("event_id", event.EventID),        // 使用 kafkaevents.PostDeletedEvent 的 EventID
+		zap.Uint64("event_post_id", event.PostID),    // 使用 kafkaevents.PostDeletedEvent 的 PostID
+		zap.Time("event_timestamp", event.Timestamp), // <-- 微调：记录事件时间戳
 		zap.String("topic", message.Topic),
 		zap.Int64("offset", message.Offset),
 	)
 
 	// 调用 EventService 的方法来处理已反序列化的删除事件。
-	return h.eventService.HandlePostDeleteEvent(ctx, event)
+	// 注意：eventService.HandlePostDeleteEvent 的签名需要接受 *kafkaevents.PostDeletedEvent
+	return h.eventService.HandlePostDeleteEvent(ctx, &event)
 }
 
 // isPermanentError 判断给定的错误是否为永久性错误，即不应进行重试的错误。
-// 永久性错误通常包括：
-// 1. 上下文取消或超时错误 (context.Canceled, context.DeadlineExceeded)。
-// 2. 数据验证相关的业务逻辑错误 (例如，EventService 返回的 ErrInvalidPostID, ErrEmptyTitle)。
-// 3. 消息格式或反序列化错误 (例如，json.Unmarshal 失败，或包装后的 ErrInvalidEventFormat)。
-// 4. 来自下游系统（如 Elasticsearch）的某些特定永久性错误（例如，认证失败、索引映射冲突）。
-//
-// 参数:
-//   - err: 需要判断的错误。
-//
-// 返回值:
-//   - bool: 如果错误是永久性的，则返回 true；否则返回 false（表示可以尝试重试）。
+// (注释和逻辑保持不变，但其引用的哨兵错误需要确认来源)
 func isPermanentError(err error) bool {
 	if err == nil {
 		return false // 没有错误，自然不是永久性错误。
 	}
 
 	// 1. 检查上下文相关的错误。
-	// 如果操作是因为上下文被取消或超时而失败，那么对于当前这次尝试而言是“永久的”，不应重试相同的操作。
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 
 	// 2. 检查由 EventService（或 kafka 包内定义的，如 ErrInvalidPostID 等）产生的已知永久性业务/验证错误。
-	// 使用 errors.Is 来正确处理错误链（如果错误被包装过）。
-	// 确保这些哨兵错误变量在此函数可访问的范围内定义（例如，包级别变量）。
+	// 这些哨兵错误应该在你的项目中合适的位置定义 (例如，公共错误包或 EventService 包)
 	if errors.Is(err, ErrInvalidPostID) ||
 		errors.Is(err, ErrEmptyTitle) ||
-		errors.Is(err, ErrMissingAuthorID) || // ErrMissingAuthorID 在 EventService 同一个包中定义
-		errors.Is(err, ErrInvalidEventFormat) { // ErrInvalidEventFormat 也在 EventService 同一个包中定义
+		errors.Is(err, ErrMissingAuthorID) ||
+		errors.Is(err, ErrInvalidEventFormat) {
 		return true
 	}
 
 	// 3. 检查底层的 JSON 反序列化错误。
-	// 尽管各个 handleXxxEvent 方法会尝试用 backoff.Permanent 包装这类错误，
-	// 但在这里也进行检查，可以作为一道额外的防线，或者处理其他可能产生此类错误而未被包装的情况。
-	// errors.As 用于检查错误链中是否存在特定类型的错误，并可以将错误赋给指定类型的变量。
 	var syntaxError *json.SyntaxError
 	var unmarshalTypeError *json.UnmarshalTypeError
 	if errors.As(err, &syntaxError) || errors.As(err, &unmarshalTypeError) {
-		// JSON 格式错误或类型不匹配错误通常是永久性的，因为消息内容本身有问题，重试无法解决。
 		return true
 	}
 
 	// 4. TODO: 检查来自更下游系统（如 PostRepository/Elasticsearch）的特定永久性错误。
-	//    这需要 PostRepository 定义并返回可识别的错误类型，或者 EventService 在调用 repo 后对错误进行分类和包装。
-	//    例如:
-	//    if errors.Is(err, repositories.ErrElasticsearchAuthFailed) || errors.Is(err, repositories.ErrElasticsearchMappingConflict) {
-	//        return true
-	//    }
 
-	// 5. 默认行为：如果错误不属于上述任何一种已知的永久性错误，
-	//    则假定它可能是暂时的（例如网络波动、ES 临时过载、数据库连接池耗尽等），
-	//    因此返回 false，允许 `processWithRetry` 进行重试。
+	// 5. 默认行为：假定为可重试错误。
 	return false
 }
 
 // min 是一个辅助函数，返回两个整数中较小的一个。
-// 用于在记录原始消息体时截断，避免日志过长。
+// (保持不变)
 func min(a, b int) int {
 	if a < b {
 		return a

@@ -1,7 +1,7 @@
 # 服务器配置
 server:
   listen_addr: "" # 新增：监听地址，例如 ":8080" 或 "0.0.0.0:8080"
-  port: "8080"    # 您应用本地运行时监听的端口
+  port: "8083"    # 您应用本地运行时监听的端口
   requestTimeout: "5s" # 新增：请求超时时间，例如 "5s", "1m"
 
 # Zap 日志配置 (根据共享模块更新)
@@ -30,8 +30,8 @@ kafkaConfig:
   brokers: ["localhost:9092"] # Kafka Broker 地址
   groupID: "search_service_group" # 消费者组 ID
   subscribedTopics:                # 新增：消费者组订阅的主题列表
-    - "PostAudit"
-    - "PostDelete"
+    - "post_audit_approved"  # 审核通过主题
+    - "post_deleted"         # 帖子删除主题
     # - "AnotherTopic" # 可以根据需要添加更多主题
   dlqTopic: "search_service_dlq" # 死信队列主题
   kafkaVersion: "3.6.0"         # Kafka 集群版本
@@ -48,6 +48,15 @@ elasticsearchConfig:
   addresses: ["http://localhost:9200"] # Elasticsearch 地址
   username: ""                         # 用户名 (如果 Elasticsearch 安全开启)
   password: ""                         # 密码 (如果 Elasticsearch 安全开启)
-  indexName: "posts_index"             # Elasticsearch 索引名称
-  numberOfShards: 3                    # 新增：主分片数量 (根据你的需求调整)
-  numberOfReplicas: 1                  # 新增：每个主分片的副本数量 (例如，对于生产环境，至少为1)
+
+  # 主帖子索引配置
+  primaryIndex:
+    name: "posts_index"             # 主帖子索引的名称
+    numberOfShards: 3               # 主帖子索引的分片数
+    numberOfReplicas: 1             # 主帖子索引的副本数
+
+  # 热门搜索词索引配置
+  hotTermsIndex:
+    name: "hot_search_terms_stats"  # 热门搜索词索引的名称
+    numberOfShards: 1               # 热门搜索词索引的分片数 (通常1个就够了)
+    numberOfReplicas: 1             # 热门搜索词索引的副本数 (可以与主索引不同)

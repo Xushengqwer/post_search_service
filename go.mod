@@ -5,12 +5,13 @@ go 1.23.7
 require (
 	github.com/IBM/sarama v1.45.1
 	github.com/Xushengqwer/gateway v0.0.0-20250409183222-28beab8f7f5d
-	github.com/Xushengqwer/go-common v0.0.0-20250509103604-c7192c2e2d7f
+	github.com/Xushengqwer/go-common v0.0.0-20250602154232-7705201a100f
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/elastic/go-elasticsearch/v8 v8.18.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/swaggo/files v1.0.1
 	github.com/swaggo/gin-swagger v1.6.0
+	github.com/swaggo/swag v1.8.12
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.60.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.54.0
 	go.uber.org/zap v1.27.0
@@ -75,7 +76,6 @@ require (
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/spf13/viper v1.20.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/swaggo/swag v1.8.12 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect

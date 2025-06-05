@@ -80,8 +80,8 @@ func SetupRouter(
 
 	// 3. 创建 API 版本路由组
 	// API 前缀可以考虑从配置中读取，以增加灵活性。
-	apiV1Group := router.Group("/api/v1")
-	logger.Info("API 路由将统一注册到基础路径 /api/v1 分组下。")
+	apiV1Group := router.Group("/api/v1/search")
+	logger.Info("API 路由将统一注册到基础路径 /api/v1/search 分组下。")
 
 	// 4. 注册 SearchHandler 的路由
 	// 检查 searchHandler 是否已正确初始化。

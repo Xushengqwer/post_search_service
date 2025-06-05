@@ -3,25 +3,26 @@ name: CI/CD to Tencent CVM via GHCR
 on:
   push:
     branches:
-      - main
+      - main # 当代码推送到 main 分支时触发
 
 env:
-  # GHCR 基础镜像名，不含标签和 owner。owner 会从 github.repository_owner 获取
-  # 仓库名也从 github.event.repository.name 获取，并转换为小写
-  # IMAGE_REPO_NAME: ${{ github.event.repository.name }} # 直接用 github.repository 更简单
-  APP_CONTAINER_PORT: 8083
+  # GHCR 上的基础镜像名称将基于 github.repository (Owner/RepoName)
+  # APP_CONTAINER_PORT 是你的 Go 应用在 Docker 容器内监听的端口
+  APP_CONTAINER_PORT: 8083 # 根据你的 main.go 和 config.development.yaml
 
 jobs:
   build-and-push-to-ghcr:
     name: Build and Push to GitHub Container Registry
     runs-on: ubuntu-latest
+
     permissions:
-      contents: read
-      packages: write
+      contents: read    # 读取仓库内容
+      packages: write   # 写入 GitHub Packages (GHCR)
+
     outputs:
-      # 输出主要的版本标签 (通常是短SHA) 和 latest 标签 (如果适用)
-      image_version_tag: ${{ steps.meta.outputs.version }} # 这是主要的、基于SHA的标签
-      image_latest_tag: ${{ steps.meta.outputs.tags_latest }} # 捕获明确的 latest 标签 (如果生成的话)
+      image_tag_sha: ${{ steps.meta.outputs.version }} # 输出主要的版本标签 (通常是短SHA)
+      # 如果你也想明确输出 latest 标签，可以像下面这样，但通常部署时用精确的SHA标签
+      # image_tag_latest: ${{ steps.meta.outputs.tags_latest }} # 假设 metadata-action 有这个输出
 
     steps:
       - name: Checkout code
@@ -31,46 +32,45 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }} # 触发工作流的用户名
+          password: ${{ secrets.GITHUB_TOKEN }} # GITHUB_TOKEN 自动拥有权限
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v3 # 设置支持缓存的构建器
 
       - name: Extract metadata (tags, labels) for Docker
-        id: meta
+        id: meta # 给这个步骤一个 ID，方便后面引用它的输出
         uses: docker/metadata-action@v5
         with:
-          # images 名称会自动处理为 ghcr.io/owner/repo (owner 和 repo 会保持 GitHub 上的大小写)
+          # images 名称会自动处理为 ghcr.io/Owner/RepoName (Owner 和 RepoName 会保持 GitHub 上的大小写)
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha,format=short,prefix= # 短SHA标签, 例如: abc1234
-            type=raw,value=latest,enable={{is_default_branch}} # latest 标签
+            type=sha,format=short,prefix= # 生成短SHA标签, 例如: abc1234
+            type=raw,value=latest,enable={{is_default_branch}} # 仅在默认分支上打 latest 标签
 
       - name: Build and push Docker image to GHCR
         id: build_push # 给这个步骤一个ID，方便引用其输出
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          context: . # Dockerfile 的上下文路径 (项目根目录)
+          file: ./Dockerfile # 明确指定 Dockerfile 路径
+          push: true # 确认推送镜像
+          tags: ${{ steps.meta.outputs.tags }} # 使用 metadata-action 生成的所有标签
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+          cache-from: type=gha # 使用 GitHub Actions 缓存加速构建
           cache-to: type=gha,mode=max
 
-      # Debug: 输出生成的标签，确认一下
+      # 用于调试：输出生成的标签和版本，确认是否正确
       - name: Echo Docker metadata
         run: |
-          echo "Tags: ${{ steps.meta.outputs.tags }}"
-          echo "Version (main tag): ${{ steps.meta.outputs.version }}"
-          echo "Image Digest: ${{ steps.build_push.outputs.digest }}"
-
+          echo "All generated tags by metadata-action: ${{ steps.meta.outputs.tags }}"
+          echo "Main version tag (expected to be short SHA): ${{ steps.meta.outputs.version }}"
+          echo "Image Digest from build-push: ${{ steps.build_push.outputs.digest }}"
 
   deploy-to-cvm:
     name: Deploy to Tencent Cloud CVM
     runs-on: ubuntu-latest
-    needs: build-and-push-to-ghcr
+    needs: build-and-push-to-ghcr # 依赖上一个 job 成功完成
 
     steps:
       - name: Deploy to CVM
@@ -80,19 +80,20 @@ jobs:
           username: ${{ secrets.CVM_USERNAME }}
           key: ${{ secrets.CVM_SSH_PRIVATE_KEY }}
           script: |
-            set -e
+            set -e # 如果任何命令失败，则立即退出脚本
 
-            # 从构建 job 获取基于 SHA 的短标签
-            export IMAGE_TAG_TO_PULL="${{ needs.build-and-push-to-ghcr.outputs.image_version_tag }}"
+            # 从上一个 job (build-and-push-to-ghcr) 的 outputs 中获取短 SHA 标签
+            export IMAGE_TAG_TO_PULL="${{ needs.build-and-push-to-ghcr.outputs.image_tag_sha }}"
 
             # 构造在 GHCR 上的基础镜像名，并转换为全小写以符合 docker pull 的期望
             # github.repository 的格式是 Owner/RepoName
             export GHCR_IMAGE_BASE_LOWERCASE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
 
+            # 构造要拉取的完整镜像名，使用全小写的基础名和从构建步骤获取的短 SHA 标签
             export IMAGE_TO_PULL_FULL_NAME="${GHCR_IMAGE_BASE_LOWERCASE}:${IMAGE_TAG_TO_PULL}"
 
-            export CONTAINER_NAME="post-search-app"
-            export HOST_PORT="80"
+            export CONTAINER_NAME="post-search-app" # 你想给容器起的名字
+            export HOST_PORT="80"                   # CVM 上暴露给外部的端口
             # APP_CONTAINER_PORT 是在 workflow 的 env 中定义的，值为 8083
 
             echo "准备部署的精确镜像: ${IMAGE_TO_PULL_FULL_NAME}"
@@ -104,17 +105,36 @@ jobs:
             docker login ghcr.io -u ${{ secrets.CVM_GH_USERNAME }} -p ${{ secrets.GHCR_PAT_FOR_CVM }}
 
             echo "拉取镜像: ${IMAGE_TO_PULL_FULL_NAME}"
-            docker pull ${IMAGE_TO_PULL_FULL_NAME}
+            # 增加 docker pull 的超时和重试逻辑 (简单版本)
+            retry_count=0
+            max_retries=3
+            retry_delay=10 # 秒
+            until docker pull ${IMAGE_TO_PULL_FULL_NAME}; do
+              retry_count=$((retry_count + 1))
+              if [ $retry_count -ge $max_retries ]; then
+                echo "拉取镜像 ${IMAGE_TO_PULL_FULL_NAME} 失败次数过多，放弃部署。"
+                exit 1
+              fi
+              echo "拉取镜像失败，将在 ${retry_delay} 秒后重试... (尝试次数: ${retry_count}/${max_retries})"
+              sleep $retry_delay
+            done
+            echo "镜像 ${IMAGE_TO_PULL_FULL_NAME} 拉取成功！"
 
             echo "停止并删除旧容器 (如果存在)..."
             docker stop ${CONTAINER_NAME} || true
             docker rm ${CONTAINER_NAME} || true
 
             echo "启动新容器..."
+            # 注意：关于配置文件和依赖服务 (Kafka, ES) 的问题我们后续处理
+            # 你需要确保你的 Go 应用能正确读取配置，并且能连接到运行在 CVM 或其他地方的 Kafka 和 ES
             docker run -d \
               -p ${HOST_PORT}:${{ env.APP_CONTAINER_PORT }} \
               --name ${CONTAINER_NAME} \
               ${IMAGE_TO_PULL_FULL_NAME}
+              # 如果需要环境变量来指定配置文件路径或依赖服务地址，在这里通过 -e 添加：
+              # -e CONFIG_FILE_PATH_IN_CONTAINER="/app/config/config.production.yaml" \
+              # -e KAFKA_BROKERS_IN_CONTAINER="your_kafka_cvm_ip_or_service_name:9092" \
+              # -e ES_ADDRESSES_IN_CONTAINER="http://your_es_cvm_ip_or_service_name:9200"
 
             echo "清理旧镜像..."
             docker image prune -af

@@ -1,16 +1,13 @@
-name: Build and Push to GHCR, then Deploy to CVM
+name: CI/CD to Tencent CVM via GHCR
 
 on:
   push:
     branches:
-      - main # 当代码推送到 main 分支时触发
+      - main
 
 env:
-  # GHCR 上的镜像名称格式: ghcr.io/GITHUB_USERNAME/REPOSITORY_NAME
-  # github.repository 会提供 "OWNER/REPONAME"
   IMAGE_NAME: ghcr.io/${{ github.repository }}
-  # 你的 Go 应用在 Docker 容器内监听的端口
-  APP_CONTAINER_PORT: 8083 # 从你的 main.go 和 config.development.yaml 看，应用监听8083
+  APP_CONTAINER_PORT: 8083
 
 jobs:
   build-and-push-to-ghcr:
@@ -19,7 +16,7 @@ jobs:
 
     permissions:
       contents: read
-      packages: write # 允许写入 GitHub Packages (GHCR)
+      packages: write
 
     steps:
       - name: Checkout code
@@ -32,32 +29,36 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # --- 新增或修改的部分 ---
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      # --- 结束新增或修改的部分 ---
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,prefix= # 使用 Git commit SHA 作为标签 (例如: a1b2c3d)
-            type=raw,value=latest,enable={{is_default_branch}} # 仅在默认分支 (main) 上打 latest 标签
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image to GHCR
         uses: docker/build-push-action@v5
         with:
-          context: . # Dockerfile 的上下文路径 (项目根目录)
-          file: ./Dockerfile # 明确指定 Dockerfile 路径
+          context: .
+          file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # 如果你的 Go 应用构建时需要特定的 Go 版本，可以在这里或 Dockerfile 中指定
-          # 如果你的 Dockerfile 中已经有 FROM golang:x.xx，则这里通常不需要额外设置
 
+  # deploy-to-cvm job 保持不变
   deploy-to-cvm:
     name: Deploy to Tencent Cloud CVM
     runs-on: ubuntu-latest
-    needs: build-and-push-to-ghcr # 依赖上一个 job 成功
+    needs: build-and-push-to-ghcr
 
     steps:
       - name: Deploy to CVM
@@ -67,14 +68,13 @@ jobs:
           username: ${{ secrets.CVM_USERNAME }}
           key: ${{ secrets.CVM_SSH_PRIVATE_KEY }}
           script: |
-            set -e # 如果任何命令失败，则立即退出脚本
+            set -e 
 
             export IMAGE_OWNER_REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
             export IMAGE_TO_PULL="ghcr.io/${IMAGE_OWNER_REPO_LOWERCASE}:${{ github.sha }}"
-            export CONTAINER_NAME="post-search-app" # 你想给容器起的名字
-            export HOST_PORT="80" # CVM 上暴露给外部的端口，例如 80
-            # APP_CONTAINER_PORT 已在 env 中定义为 8083
-
+            export CONTAINER_NAME="post-search-app" 
+            export HOST_PORT="80" 
+            
             echo "准备部署镜像: ${IMAGE_TO_PULL}"
             echo "容器内应用端口: ${{ env.APP_CONTAINER_PORT }}"
             echo "CVM主机端口: ${HOST_PORT}"
@@ -90,21 +90,11 @@ jobs:
             docker rm ${CONTAINER_NAME} || true
 
             echo "启动新容器..."
-            # 注意：这里需要将你的应用配置文件和可能的其他依赖挂载到容器中
-            # 或者在 Dockerfile 中将配置文件复制进去。
-            # 假设你的 Dockerfile 已经处理了配置文件，或者你的应用可以从环境变量读取所有配置。
-            # 如果需要挂载配置文件，你需要先通过 scp 或其他方式将配置文件上传到 CVM 的某个路径，
-            # 然后在 docker run 命令中使用 -v /path/on/cvm/config:/app/config (类似这样的)
-            # 另外，你的应用似乎依赖 Kafka 和 Elasticsearch，这些服务需要在 CVM 上或可访问的网络中运行。
-            # 这个部署脚本只负责部署你的 Go 应用容器。
             docker run -d \
               -p ${HOST_PORT}:${{ env.APP_CONTAINER_PORT }} \
               --name ${CONTAINER_NAME} \
               ${IMAGE_TO_PULL}
-              # 如果需要传递环境变量给 Go 应用，可以在这里加 -e KEY=VALUE
-              # 例如: -e CONFIG_PATH_IN_CONTAINER=/app/config/config.production.yaml
-              # (假设你有一个生产环境的配置文件，并且它在镜像的 /app/config/ 目录下)
-
+            
             echo "清理旧镜像..."
             docker image prune -af
 

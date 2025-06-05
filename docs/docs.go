@@ -342,8 +342,6 @@ var SwaggerInfo = &swag.Spec{
 	Description:      "这是帖子搜索服务的 API 文档。它允许搜索从 Kafka 事件中索引的帖子。",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
-	LeftDelim:        "{{",
-	RightDelim:       "}}",
 }
 
 func init() {

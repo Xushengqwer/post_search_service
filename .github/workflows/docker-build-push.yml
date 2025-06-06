@@ -86,7 +86,7 @@ jobs:
             export GHCR_IMAGE_BASE_LOWERCASE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
             export IMAGE_TO_PULL_FULL_NAME="${GHCR_IMAGE_BASE_LOWERCASE}:${IMAGE_TAG_TO_PULL}"
             export CONTAINER_NAME="post-search-app"
-            export HOST_PORT="80" # 你的应用将通过 CVM 的 80 端口对外提供服务
+            export HOST_PORT="80"
 
             echo "登录 GHCR..."
             docker login ghcr.io -u ${{ secrets.CVM_GH_USERNAME }} -p ${{ secrets.GHCR_PAT_FOR_CVM }}
@@ -99,19 +99,24 @@ jobs:
             docker rm ${CONTAINER_NAME} || true
 
             echo "启动新容器并注入生产环境变量..."
-            # Viper 会自动查找大写的、用下划线分隔的环境变量来覆盖配置文件中的同名项
-            # 例如: kafkaConfig.brokers 会被 KAFKACONFIG_BROKERS 覆盖
-            # 我们直接使用 CVM 的内网 IP，这个 IP 从 GitHub Secrets 中获取
+            # --- 主要修改在这里 ---
+            # 我们将数组格式的环境变量改为更通用的逗号分隔字符串
             docker run -d \
               -p ${HOST_PORT}:${{ env.APP_CONTAINER_PORT }} \
               --name ${CONTAINER_NAME} \
               -e ZAPCONFIG_LEVEL="info" \
               -e TRACERCONFIG_ENABLED="false" \
-              -e KAFKACONFIG_BROKERS="[${{ secrets.CVM_PRIVATE_IP }}:9092,${{ secrets.CVM_PRIVATE_IP }}:9093]" \
-              -e ELASTICSEARCHCONFIG_ADDRESSES="[http://${{ secrets.CVM_PRIVATE_IP }}:9200]" \
+              -e KAFKACONFIG_BROKERS="${{ secrets.CVM_PRIVATE_IP }}:9092,${{ secrets.CVM_PRIVATE_IP }}:9093" \
+              -e ELASTICSEARCHCONFIG_ADDRESSES="http://${{ secrets.CVM_PRIVATE_IP }}:9200" \
               ${IMAGE_TO_PULL_FULL_NAME}
+            # --- 结束修改 ---
 
             echo "清理旧镜像..."
             docker image prune -af
 
-            echo "部署成功! 应用正在 CVM 的 ${HOST_PORT} 端口上运行。"
+            echo "部署成功! 正在等待应用启动..."
+            # 等待几秒钟，给容器启动和应用初始化留出时间
+            sleep 10 
+
+            echo "查看容器最新日志:"
+            docker logs --tail 50 ${CONTAINER_NAME}

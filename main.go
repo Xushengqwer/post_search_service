@@ -141,7 +141,7 @@ func main() {
 	// 7. 初始化业务服务层 - EventService (用于处理 Kafka 事件)
 	// EventService 依赖 postRepo (用于帖子索引) 和 logger
 	eventSvc := coreKafka.NewEventService(postRepo, logger) // [cite: post_search/main.go]
-	logger.Info("EventService 初始化成功。")                 // [cite: post_search/main.go]
+	logger.Info("EventService 初始化成功。")                      // [cite: post_search/main.go]
 
 	// 8. 初始化 Kafka Sarama 配置
 	saramaCfg, err := coreKafka.ConfigureSarama(cfg.KafkaConfig, logger) // [cite: post_search/main.go]
@@ -261,7 +261,7 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second) // [cite: post_search/main.go]
 	defer shutdownCancel()                                                                   // [cite: post_search/main.go]
 
-	logger.Info("正在优雅地关闭 HTTP API 服务器...")         // [cite: post_search/main.go]
+	logger.Info("正在优雅地关闭 HTTP API 服务器...")                   // [cite: post_search/main.go]
 	if err := httpServer.Shutdown(shutdownCtx); err != nil { // [cite: post_search/main.go]
 		logger.Error("关闭 HTTP API 服务器时发生错误", zap.Error(err))
 	} else {

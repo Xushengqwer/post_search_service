@@ -6,7 +6,7 @@ on:
       - main
 
 env:
-  APP_CONTAINER_PORT: 8083 # 你的 Go 应用在 Docker 容器内监听的端口
+  APP_CONTAINER_PORT: 8083
 
 jobs:
   build-and-push-to-ghcr:
@@ -16,7 +16,6 @@ jobs:
       contents: read
       packages: write
     outputs:
-      # 我们将在这里明确提取并输出短SHA标签
       image_tag_short_sha: ${{ steps.extract_sha_tag.outputs.sha_tag }}
 
     steps:
@@ -37,9 +36,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }} # GHCR 上的包名与仓库名一致 (Owner/RepoName)
+          images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha,format=short,prefix= # 生成短SHA标签, 例如: abc1234
+            type=sha,format=short,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image to GHCR
@@ -54,29 +53,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 从所有生成的标签中提取出短SHA标签
-      # steps.meta.outputs.tags 是一个逗号分隔的列表，例如: ghcr.io/owner/repo:shortsha,ghcr.io/owner/repo:latest
       - name: Extract short SHA tag from metadata
         id: extract_sha_tag
         run: |
           TAGS="${{ steps.meta.outputs.tags }}"
-          # 查找不包含 'latest' 且包含 ghcr.io/owner/repo 的标签，然后提取冒号后的部分
-          # 这假设短SHA标签是唯一的非latest标签
           SHA_TAG=$(echo "$TAGS" | tr ',' '\n' | grep -v 'latest' | grep "ghcr.io/${{ github.repository }}:" | head -n 1 | sed 's/.*://')
           if [ -z "$SHA_TAG" ]; then
-            echo "Error: Could not extract short SHA tag from metadata tags: $TAGS"
-            # 如果找不到，尝试直接使用 github.sha 的前7位作为备选
             echo "Falling back to truncated github.sha"
             SHA_TAG=$(echo "${{ github.sha }}" | cut -c1-7)
           fi
           echo "Extracted short SHA tag: $SHA_TAG"
           echo "sha_tag=$SHA_TAG" >> $GITHUB_OUTPUT
-
-      - name: Echo Docker metadata for verification
-        run: |
-          echo "All generated tags by metadata-action: ${{ steps.meta.outputs.tags }}"
-          echo "Extracted short SHA tag for deployment: ${{ steps.extract_sha_tag.outputs.sha_tag }}"
-          echo "Image Digest from build-push: ${{ steps.build_push.outputs.digest }}"
 
   deploy-to-cvm:
     name: Deploy to Tencent Cloud CVM
@@ -90,7 +77,7 @@ jobs:
           host: ${{ secrets.CVM_HOST }}
           username: ${{ secrets.CVM_USERNAME }}
           key: ${{ secrets.CVM_SSH_PRIVATE_KEY }}
-          command_timeout: 20m # 增加命令超时到20分钟
+          command_timeout: 20m
 
           script: |
             set -e
@@ -99,43 +86,32 @@ jobs:
             export GHCR_IMAGE_BASE_LOWERCASE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
             export IMAGE_TO_PULL_FULL_NAME="${GHCR_IMAGE_BASE_LOWERCASE}:${IMAGE_TAG_TO_PULL}"
             export CONTAINER_NAME="post-search-app"
-            export HOST_PORT="80"
-
-            echo "准备部署的精确镜像: ${IMAGE_TO_PULL_FULL_NAME}"
-            echo "使用的标签 (应为短SHA): ${IMAGE_TAG_TO_PULL}"
-            echo "容器内应用端口: ${{ env.APP_CONTAINER_PORT }}"
-            echo "CVM主机端口: ${HOST_PORT}"
+            export HOST_PORT="80" # 你的应用将通过 CVM 的 80 端口对外提供服务
 
             echo "登录 GHCR..."
             docker login ghcr.io -u ${{ secrets.CVM_GH_USERNAME }} -p ${{ secrets.GHCR_PAT_FOR_CVM }}
 
             echo "拉取镜像: ${IMAGE_TO_PULL_FULL_NAME}"
-            retry_count=0
-            max_retries=3
-            retry_delay=20 # 增加重试间隔到20秒
-            until docker pull ${IMAGE_TO_PULL_FULL_NAME}; do
-              retry_count=$((retry_count + 1))
-              if [ $retry_count -ge $max_retries ]; then
-                echo "拉取镜像 ${IMAGE_TO_PULL_FULL_NAME} 失败次数过多，放弃部署。"
-                exit 1
-              fi
-              echo "拉取镜像失败，将在 ${retry_delay} 秒后重试... (尝试次数: ${retry_count}/${max_retries})"
-              sleep $retry_delay
-            done
-            echo "镜像 ${IMAGE_TO_PULL_FULL_NAME} 拉取成功！"
+            docker pull ${IMAGE_TO_PULL_FULL_NAME}
 
             echo "停止并删除旧容器 (如果存在)..."
             docker stop ${CONTAINER_NAME} || true
             docker rm ${CONTAINER_NAME} || true
 
-            echo "启动新容器..."
+            echo "启动新容器并注入生产环境变量..."
+            # Viper 会自动查找大写的、用下划线分隔的环境变量来覆盖配置文件中的同名项
+            # 例如: kafkaConfig.brokers 会被 KAFKACONFIG_BROKERS 覆盖
+            # 我们直接使用 CVM 的内网 IP，这个 IP 从 GitHub Secrets 中获取
             docker run -d \
               -p ${HOST_PORT}:${{ env.APP_CONTAINER_PORT }} \
               --name ${CONTAINER_NAME} \
+              -e ZAPCONFIG_LEVEL="info" \
+              -e TRACERCONFIG_ENABLED="false" \
+              -e KAFKACONFIG_BROKERS="[${{ secrets.CVM_PRIVATE_IP }}:9092,${{ secrets.CVM_PRIVATE_IP }}:9093]" \
+              -e ELASTICSEARCHCONFIG_ADDRESSES="[http://${{ secrets.CVM_PRIVATE_IP }}:9200]" \
               ${IMAGE_TO_PULL_FULL_NAME}
-              # 注意配置文件和依赖服务的问题
 
             echo "清理旧镜像..."
             docker image prune -af
 
-            echo "部署成功!"
+            echo "部署成功! 应用正在 CVM 的 ${HOST_PORT} 端口上运行。"

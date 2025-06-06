@@ -18,7 +18,7 @@ zapConfig:
 
 # 分布式追踪配置 (来自 go-common)
 tracerConfig:
-  enabled: true                     # 启用追踪
+  enabled: false                     # 启用追踪
   exporter_type: "stdout"           # 开发时用 stdout 最简单，直接打印追踪信息
   # exporter_type: "otlp_grpc"      # 或者配置为 OTLP gRPC (需要 Collector 运行在 localhost:4317)
   # exporter_endpoint: "localhost:4317"

@@ -49,6 +49,27 @@ func main() {
 		log.Fatalf("致命错误: 加载配置文件 '%s' 失败: %v", configFile, err)
 	}
 
+	// --- 新增：手动从环境变量覆盖关键配置 ---
+	// 这一步是为了解决 Viper 无法直接将逗号分隔的字符串环境变量解析为 []string 的问题
+	log.Println("检查环境变量以覆盖文件配置...")
+
+	// 覆盖 Kafka Brokers
+	// 我们从环境变量 "KAFKACONFIG_BROKERS" 读取值
+	if kafkaBrokersEnv := os.Getenv("KAFKACONFIG_BROKERS"); kafkaBrokersEnv != "" {
+		// 如果环境变量不为空，则用逗号分割字符串，并覆盖 cfg 结构体中的值
+		cfg.KafkaConfig.Brokers = strings.Split(kafkaBrokersEnv, ",")
+		log.Printf("通过环境变量 KAFKACONFIG_BROKERS 覆盖了 Kafka Brokers: %v\n", cfg.KafkaConfig.Brokers)
+	}
+
+	// 覆盖 Elasticsearch Addresses
+	// 我们从环境变量 "ELASTICSEARCHCONFIG_ADDRESSES" 读取值
+	if esAddressesEnv := os.Getenv("ELASTICSEARCHCONFIG_ADDRESSES"); esAddressesEnv != "" {
+		// 如果环境变量不为空，则用逗号分割字符串，并覆盖 cfg 结构体中的值
+		cfg.ElasticsearchConfig.Addresses = strings.Split(esAddressesEnv, ",")
+		log.Printf("通过环境变量 ELASTICSEARCHCONFIG_ADDRESSES 覆盖了 Elasticsearch Addresses: %v\n", cfg.ElasticsearchConfig.Addresses)
+	}
+	// --- 结束新增部分 ---
+
 	logger, loggerErr := core.NewZapLogger(cfg.ZapConfig)
 	if loggerErr != nil {
 		log.Fatalf("致命错误: 初始化 ZapLogger 失败: %v", loggerErr)
@@ -62,7 +83,7 @@ func main() {
 	logger.Info("Logger 初始化成功。")
 
 	// --- HTTP Transport 和 Tracer 初始化 ---
-	baseHttpTransport := &http.Transport{ // [cite: post_search/main.go]
+	baseHttpTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -107,16 +128,13 @@ func main() {
 	// --- 核心组件初始化 ---
 
 	// 4. 初始化 Elasticsearch 客户端
-	// NewESClient 现在会处理两个索引的创建（如果它们不存在）
-	esClientCore, err := coreES.NewESClient(cfg.ElasticsearchConfig, logger, esHttpClientTransport) // [cite: post_search/main.go]
+	esClientCore, err := coreES.NewESClient(cfg.ElasticsearchConfig, logger, esHttpClientTransport)
 	if err != nil {
 		logger.Fatal("创建 Elasticsearch 客户端失败", zap.Error(err))
 	}
 	logger.Info("Elasticsearch 客户端初始化成功。")
 
 	// 5. 初始化 Elasticsearch Repositories
-	// 5.a 初始化主帖子仓库 (PostRepository)
-	// 从配置中获取主帖子索引的名称
 	primaryIndexName := cfg.ElasticsearchConfig.PrimaryIndex.Name
 	if primaryIndexName == "" {
 		logger.Fatal("主帖子索引名称 (elasticsearchConfig.primaryIndex.name) 未在配置中指定。")
@@ -124,8 +142,6 @@ func main() {
 	postRepo := repoES.NewESPostRepository(esClientCore.Client, primaryIndexName, logger)
 	logger.Info("主帖子 Elasticsearch Repository (PostRepository) 初始化成功。", zap.String("index_name", primaryIndexName))
 
-	// 5.b 初始化热门搜索词仓库 (HotSearchTermRepository)
-	// 从配置中获取热门搜索词索引的名称
 	hotTermsIndexName := cfg.ElasticsearchConfig.HotTermsIndex.Name
 	if hotTermsIndexName == "" {
 		logger.Fatal("热门搜索词索引名称 (elasticsearchConfig.hotTermsIndex.name) 未在配置中指定。")
@@ -134,28 +150,26 @@ func main() {
 	logger.Info("热门搜索词 Elasticsearch Repository (HotSearchTermRepository) 初始化成功。", zap.String("index_name", hotTermsIndexName))
 
 	// 6. 初始化业务服务层 - SearchService
-	// 将两个仓库都注入到 SearchService
-	searchSvc := service.NewSearchService(postRepo, hotSearchTermRepo, logger) // [cite: post_search/main.go]
+	searchSvc := service.NewSearchService(postRepo, hotSearchTermRepo, logger)
 	logger.Info("SearchService 初始化成功。")
 
 	// 7. 初始化业务服务层 - EventService (用于处理 Kafka 事件)
-	// EventService 依赖 postRepo (用于帖子索引) 和 logger
-	eventSvc := coreKafka.NewEventService(postRepo, logger) // [cite: post_search/main.go]
-	logger.Info("EventService 初始化成功。")                      // [cite: post_search/main.go]
+	eventSvc := coreKafka.NewEventService(postRepo, logger)
+	logger.Info("EventService 初始化成功。")
 
 	// 8. 初始化 Kafka Sarama 配置
-	saramaCfg, err := coreKafka.ConfigureSarama(cfg.KafkaConfig, logger) // [cite: post_search/main.go]
+	saramaCfg, err := coreKafka.ConfigureSarama(cfg.KafkaConfig, logger)
 	if err != nil {
 		logger.Fatal("配置 Sarama (Kafka 客户端库) 失败", zap.Error(err))
 	}
 	logger.Info("Sarama (Kafka 客户端库) 配置初始化成功。")
 
 	// 9. 初始化 Kafka DLQ (死信队列) 生产者
-	dlqProducer, err := coreKafka.NewSyncProducer(cfg.KafkaConfig, saramaCfg, logger) // [cite: post_search/main.go]
+	dlqProducer, err := coreKafka.NewSyncProducer(cfg.KafkaConfig, saramaCfg, logger)
 	if err != nil {
 		logger.Fatal("创建 Kafka DLQ 同步生产者失败", zap.Error(err))
 	}
-	defer func() { // [cite: post_search/main.go]
+	defer func() {
 		logger.Info("正在关闭 Kafka DLQ 生产者...")
 		if err := dlqProducer.Close(); err != nil {
 			logger.Error("关闭 Kafka DLQ 生产者时发生错误", zap.Error(err))
@@ -167,22 +181,21 @@ func main() {
 
 	// 10. 初始化 Kafka 消息处理器 (Handler)
 	var auditTopic, deleteTopic string
-	if len(cfg.KafkaConfig.SubscribedTopics) >= 1 { // [cite: post_search/main.go]
+	if len(cfg.KafkaConfig.SubscribedTopics) >= 1 {
 		auditTopic = cfg.KafkaConfig.SubscribedTopics[0]
 	} else {
 		logger.Fatal("Kafka 配置错误：未找到用于审计事件的主题 (SubscribedTopics[0])")
 	}
-	if len(cfg.KafkaConfig.SubscribedTopics) >= 2 { // [cite: post_search/main.go]
+	if len(cfg.KafkaConfig.SubscribedTopics) >= 2 {
 		deleteTopic = cfg.KafkaConfig.SubscribedTopics[1]
 	} else {
 		logger.Warn("Kafka 配置警告：未明确找到用于删除事件的主题 (期望在 SubscribedTopics[1])。如果服务不处理删除事件，此警告可忽略。")
 	}
-	// auditTopic 和 deleteTopic 的检查保持不变
-	if auditTopic == "" || (deleteTopic == "" && len(cfg.KafkaConfig.SubscribedTopics) > 1) { // [cite: post_search/main.go]
+	if auditTopic == "" || (deleteTopic == "" && len(cfg.KafkaConfig.SubscribedTopics) > 1) {
 		logger.Fatal("Kafka 主题配置不完整：auditTopic 或 deleteTopic 未能正确从 SubscribedTopics 中提取。")
 	}
 
-	kafkaHandler := coreKafka.NewHandler( // [cite: post_search/main.go]
+	kafkaHandler := coreKafka.NewHandler(
 		eventSvc,
 		dlqProducer,
 		cfg.KafkaConfig.DLQTopic,
@@ -194,7 +207,7 @@ func main() {
 	logger.Info("Kafka 消息处理器 (Handler) 初始化成功。")
 
 	// 11. 初始化 Kafka 消费者组
-	consumerGroup, err := coreKafka.NewConsumerGroup( // [cite: post_search/main.go]
+	consumerGroup, err := coreKafka.NewConsumerGroup(
 		cfg.KafkaConfig,
 		saramaCfg,
 		kafkaHandler,
@@ -203,7 +216,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("创建 Kafka 消费者组失败", zap.Error(err))
 	}
-	defer func() { // [cite: post_search/main.go]
+	defer func() {
 		logger.Info("正在关闭 Kafka 消费者组...")
 		if err := consumerGroup.Close(); err != nil {
 			logger.Error("关闭 Kafka 消费者组时发生错误", zap.Error(err))
@@ -214,33 +227,33 @@ func main() {
 	logger.Info("Kafka 消费者组初始化成功。")
 
 	// 12. 初始化 API Handler (控制器)
-	searchApiHandler := api.NewSearchHandler(searchSvc, logger) // [cite: post_search/main.go]
+	searchApiHandler := api.NewSearchHandler(searchSvc, logger)
 	logger.Info("API Handler (SearchHandler) 初始化成功。")
 
 	// 13. 初始化并配置 Gin Web 引擎及路由
-	ginRouter := router.SetupRouter(logger, &cfg, searchApiHandler) // [cite: post_search/main.go]
+	ginRouter := router.SetupRouter(logger, &cfg, searchApiHandler)
 	logger.Info("Gin Web 引擎及 API 路由初始化和注册成功。")
 
 	// --- 服务启动与优雅关闭 ---
-	ctx, cancel := context.WithCancel(context.Background()) // [cite: post_search/main.go]
-	defer cancel()                                          // [cite: post_search/main.go]
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	consumerGroup.Start(ctx) // [cite: post_search/main.go]
+	consumerGroup.Start(ctx)
 	logger.Info("Kafka 消费者组已启动，开始在后台消费消息。")
 
-	serverAddr := cfg.Server.ListenAddr // [cite: post_search/main.go]
+	serverAddr := cfg.Server.ListenAddr
 	if serverAddr == "" {
 		serverAddr = ":" + cfg.Server.Port
 	} else if !strings.Contains(serverAddr, ":") {
 		serverAddr = serverAddr + ":" + cfg.Server.Port
 	}
 
-	httpServer := &http.Server{ // [cite: post_search/main.go]
+	httpServer := &http.Server{
 		Addr:    serverAddr,
 		Handler: ginRouter,
 	}
 
-	go func() { // [cite: post_search/main.go]
+	go func() {
 		logger.Info("HTTP API 服务器正在启动...", zap.String("listen_address", serverAddr))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP API 服务器启动失败或意外停止", zap.Error(err))
@@ -248,21 +261,21 @@ func main() {
 		}
 	}()
 
-	quitSignal := make(chan os.Signal, 1)                      // [cite: post_search/main.go]
-	signal.Notify(quitSignal, syscall.SIGINT, syscall.SIGTERM) // [cite: post_search/main.go]
+	quitSignal := make(chan os.Signal, 1)
+	signal.Notify(quitSignal, syscall.SIGINT, syscall.SIGTERM)
 	logger.Info("服务已成功启动。正在监听中断或终止信号以进行优雅关闭...")
 
-	receivedSignal := <-quitSignal // [cite: post_search/main.go]
+	receivedSignal := <-quitSignal
 	logger.Info("接收到关闭信号，开始进行服务的优雅关闭...", zap.String("signal", receivedSignal.String()))
 
-	cancel() // [cite: post_search/main.go]
+	cancel()
 	logger.Info("已发出全局上下文取消信号，通知所有组件开始关闭。")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second) // [cite: post_search/main.go]
-	defer shutdownCancel()                                                                   // [cite: post_search/main.go]
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
 
-	logger.Info("正在优雅地关闭 HTTP API 服务器...")                   // [cite: post_search/main.go]
-	if err := httpServer.Shutdown(shutdownCtx); err != nil { // [cite: post_search/main.go]
+	logger.Info("正在优雅地关闭 HTTP API 服务器...")
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("关闭 HTTP API 服务器时发生错误", zap.Error(err))
 	} else {
 		logger.Info("HTTP API 服务器已成功关闭。")

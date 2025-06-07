@@ -1,4 +1,4 @@
-name: CI/CD to Tencent CVM via GHCR
+name: CI/CD for Post Search Service
 
 on:
   push:
@@ -10,28 +10,25 @@ env:
 
 jobs:
   build-and-push-to-ghcr:
-    name: Build and Push to GitHub Container Registry
+    # ... (这个 job 的内容保持不变) ...
+    name: Build and Push Post Search to GHCR
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     outputs:
       image_tag_short_sha: ${{ steps.extract_sha_tag.outputs.sha_tag }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
@@ -40,9 +37,7 @@ jobs:
           tags: |
             type=sha,format=short,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
-
       - name: Build and push Docker image to GHCR
-        id: build_push
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -52,7 +47,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
       - name: Extract short SHA tag from metadata
         id: extract_sha_tag
         run: |
@@ -62,34 +56,29 @@ jobs:
             echo "Falling back to truncated github.sha"
             SHA_TAG=$(echo "${{ github.sha }}" | cut -c1-7)
           fi
-          echo "Extracted short SHA tag: $SHA_TAG"
           echo "sha_tag=$SHA_TAG" >> $GITHUB_OUTPUT
 
-  # ... (name, on, env, build-and-push-to-ghcr job 保持不变) ...
-
   deploy-to-cvm:
-    name: Deploy to Tencent Cloud CVM
+    name: Deploy Post Search Service to CVM
     runs-on: ubuntu-latest
     needs: build-and-push-to-ghcr
 
     steps:
-      - name: Deploy to CVM
+      - name: Deploy Post Search Service to CVM
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.CVM_HOST }}
           username: ${{ secrets.CVM_USERNAME }}
           key: ${{ secrets.CVM_SSH_PRIVATE_KEY }}
           command_timeout: 20m
-
           script: |
             set -e
-
+            
             export IMAGE_TAG_TO_PULL="${{ needs.build-and-push-to-ghcr.outputs.image_tag_short_sha }}"
             export GHCR_IMAGE_BASE_LOWERCASE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
             export IMAGE_TO_PULL_FULL_NAME="${GHCR_IMAGE_BASE_LOWERCASE}:${IMAGE_TAG_TO_PULL}"
             export CONTAINER_NAME="post-search-app"
-            export HOST_PORT="80"
-            export DOCKER_NETWORK_NAME="doer_infra_doer_xyz_dev_network" # <-- 新增：定义要加入的网络名
+            export DOCKER_NETWORK_NAME="doer_infra_doer_xyz_dev_network"
 
             echo "登录 GHCR..."
             docker login ghcr.io -u ${{ secrets.CVM_GH_USERNAME }} -p ${{ secrets.GHCR_PAT_FOR_CVM }}
@@ -101,25 +90,16 @@ jobs:
             docker stop ${CONTAINER_NAME} || true
             docker rm ${CONTAINER_NAME} || true
 
-            echo "启动新容器，加入 Docker 网络，并注入生产环境变量..."
-            # --- 主要修改在这里 ---
-            # 我们将使用 Docker 服务名代替 IP 地址进行连接
+            echo "启动新容器 (后台模式，不暴露端口)..."
             docker run -d \
-              -p ${HOST_PORT}:${{ env.APP_CONTAINER_PORT }} \
               --name ${CONTAINER_NAME} \
               --network ${DOCKER_NETWORK_NAME} \
-              -e ZAPCONFIG_LEVEL="info" \
-              -e TRACERCONFIG_ENABLED="false" \
-              -e KAFKACONFIG_BROKERS="kafka-broker1:29092,kafka-broker2:29093" \
+              --restart unless-stopped \
               -e ELASTICSEARCHCONFIG_ADDRESSES="http://elasticsearch:9200" \
+              -e KAFKACONFIG_BROKERS="kafka-broker1:29092,kafka-broker2:29093" \
               ${IMAGE_TO_PULL_FULL_NAME}
-            # --- 结束修改 ---
 
-            echo "清理旧镜像..."
-            docker image prune -af
-
-            echo "部署成功! 正在等待应用启动..."
-            sleep 10
-
-            echo "查看容器最新日志:"
-            docker logs --tail 50 ${CONTAINER_NAME}
+            echo "部署成功! Post Search 应用正在 CVM 上以后台模式运行。"
+            sleep 5
+            echo "查看 Post Search 容器最新日志:"
+            docker logs --tail 20 ${CONTAINER_NAME}

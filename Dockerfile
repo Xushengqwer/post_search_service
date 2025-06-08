@@ -21,8 +21,7 @@ COPY . .
 # 编译 Go 应用程序
 # -ldflags="-w -s" 用于减小二进制文件大小
 # -o /app/post_search_server 指定输出的二进制文件路径和名称
-RUN go build -ldflags="-w -s" -o /app/post_search_server ./cmd/main.go
-
+RUN go build -ldflags="-w -s" -o /app/post_search_server ./main.go
 
 # ---- Final Stage ----
 # 使用一个极简的基础镜像

@@ -1,7 +1,9 @@
+// post_search/main.go (已更新)
 package main
 
 import (
 	"context"
+	"encoding/json" // 导入 encoding/json 包
 	"errors"
 	"flag"
 	_ "github.com/Xushengqwer/post_search/docs" // 确保路径正确
@@ -49,10 +51,6 @@ func main() {
 		log.Fatalf("致命错误: 加载配置文件 '%s' 失败: %v", configFile, err)
 	}
 
-	// --- 新增：手动从环境变量覆盖关键配置 ---
-	// 这一步是为了解决 Viper 无法直接将逗号分隔的字符串环境变量解析为 []string 的问题
-	log.Println("检查环境变量以覆盖文件配置...")
-
 	// 覆盖 Kafka Brokers
 	// 我们从环境变量 "KAFKACONFIG_BROKERS" 读取值
 	if kafkaBrokersEnv := os.Getenv("KAFKACONFIG_BROKERS"); kafkaBrokersEnv != "" {
@@ -68,8 +66,15 @@ func main() {
 		cfg.ElasticsearchConfig.Addresses = strings.Split(esAddressesEnv, ",")
 		log.Printf("通过环境变量 ELASTICSEARCHCONFIG_ADDRESSES 覆盖了 Elasticsearch Addresses: %v\n", cfg.ElasticsearchConfig.Addresses)
 	}
-	// --- 结束新增部分 ---
 
+	// --- 【新增】打印最终配置以供调试 ---
+	configBytes, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		log.Fatalf("无法序列化最终配置以进行打印: %v", err)
+	}
+	log.Printf("应用最终将使用以下配置:\n%s\n", string(configBytes))
+
+	// 注册zapLogger实例
 	logger, loggerErr := core.NewZapLogger(cfg.ZapConfig)
 	if loggerErr != nil {
 		log.Fatalf("致命错误: 初始化 ZapLogger 失败: %v", loggerErr)

@@ -1,3 +1,5 @@
+# .github/workflows/your-workflow-name.yml (最终修正版)
+
 name: CI/CD for Post Search Service
 
 on:
@@ -10,14 +12,13 @@ env:
 
 jobs:
   build-and-push-to-ghcr:
-    # ... (这个 job 的内容保持不变) ...
     name: Build and Push Post Search to GHCR
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     outputs:
-      image_tag_short_sha: ${{ steps.extract_sha_tag.outputs.sha_tag }}
+      image_tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,9 +35,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,format=short,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
       - name: Build and push Docker image to GHCR
         uses: docker/build-push-action@v5
         with:
@@ -47,16 +45,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Extract short SHA tag from metadata
-        id: extract_sha_tag
-        run: |
-          TAGS="${{ steps.meta.outputs.tags }}"
-          SHA_TAG=$(echo "$TAGS" | tr ',' '\n' | grep -v 'latest' | grep "ghcr.io/${{ github.repository }}:" | head -n 1 | sed 's/.*://')
-          if [ -z "$SHA_TAG" ]; then
-            echo "Falling back to truncated github.sha"
-            SHA_TAG=$(echo "${{ github.sha }}" | cut -c1-7)
-          fi
-          echo "sha_tag=$SHA_TAG" >> $GITHUB_OUTPUT
 
   deploy-to-cvm:
     name: Deploy Post Search Service to CVM
@@ -74,32 +62,47 @@ jobs:
           script: |
             set -e
             
-            export IMAGE_TAG_TO_PULL="${{ needs.build-and-push-to-ghcr.outputs.image_tag_short_sha }}"
+            export IMAGE_TAG_TO_PULL="${{ needs.build-and-push-to-ghcr.outputs.image_tag }}"
             export GHCR_IMAGE_BASE_LOWERCASE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
             export IMAGE_TO_PULL_FULL_NAME="${GHCR_IMAGE_BASE_LOWERCASE}:${IMAGE_TAG_TO_PULL}"
             export CONTAINER_NAME="post-search-app"
             export DOCKER_NETWORK_NAME="doer_infra_doer_xyz_dev_network"
 
-            echo "登录 GHCR..."
+            echo "==> 1. 登录 GHCR..."
             docker login ghcr.io -u ${{ secrets.CVM_GH_USERNAME }} -p ${{ secrets.GHCR_PAT_FOR_CVM }}
 
-            echo "拉取镜像: ${IMAGE_TO_PULL_FULL_NAME}"
+            echo "==> 2. 拉取镜像: ${IMAGE_TO_PULL_FULL_NAME}"
             docker pull ${IMAGE_TO_PULL_FULL_NAME}
 
-            echo "停止并删除旧容器 (如果存在)..."
+            echo "==> 3. 停止并删除旧容器 (如果存在)..."
             docker stop ${CONTAINER_NAME} || true
             docker rm ${CONTAINER_NAME} || true
 
-            echo "启动新容器 (后台模式，不暴露端口)..."
+            echo "==> 4. 启动新容器..."
             docker run -d \
               --name ${CONTAINER_NAME} \
               --network ${DOCKER_NETWORK_NAME} \
               --restart unless-stopped \
+              -p ${{ env.APP_CONTAINER_PORT }}:${{ env.APP_CONTAINER_PORT }} \
               -e ELASTICSEARCHCONFIG_ADDRESSES="http://elasticsearch:9200" \
-              -e KAFKACONFIG_BROKERS="kafka-broker1:29092,kafka-broker2:29093" \
+              -e KAFKACONFIG_BROKERS="kafka:9092" \
               ${IMAGE_TO_PULL_FULL_NAME}
 
-            echo "部署成功! Post Search 应用正在 CVM 上以后台模式运行。"
-            sleep 5
-            echo "查看 Post Search 容器最新日志:"
-            docker logs --tail 20 ${CONTAINER_NAME}
+            echo "==> 5. 检查容器健康状态..."
+            for i in {1..12}; do
+              HEALTH_STATUS=$(docker inspect --format '{{.State.Health.Status}}' ${CONTAINER_NAME})
+              if [ "${HEALTH_STATUS}" == "healthy" ]; then
+                echo "✅ 容器已健康运行!"
+                break
+              fi
+              echo "等待容器健康... 当前状态: ${HEALTH_STATUS} (尝试次数 ${i}/12)"
+              sleep 5
+            done
+            
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' ${CONTAINER_NAME})" != "healthy" ]; then
+                echo "❌ 部署失败: 容器未能在60秒内达到健康状态。"
+                docker logs ${CONTAINER_NAME}
+                exit 1
+            fi
+
+            echo "🚀 部署成功完成! Post Search 应用正在 CVM 的 ${{ env.APP_CONTAINER_PORT }} 端口上运行。"

@@ -1,4 +1,4 @@
-# .github/workflows/your-workflow-name.yml (最终修正版)
+# .github/workflows/your-workflow-name.yml (最终对齐版)
 
 name: CI/CD for Post Search Service
 
@@ -18,7 +18,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      image_tag: ${{ steps.meta.outputs.version }}
+      image_tag: ${{ steps.meta.outputs.version }} # 定义输出，key 为 image_tag
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -31,7 +31,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Extract metadata (tags, labels) for Docker
-        id: meta
+        id: meta # step 的 id 是 meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
@@ -62,6 +62,7 @@ jobs:
           script: |
             set -e
             
+            # 【关键修正】确保这里引用的 outputs key 与上面定义的完全一致
             export IMAGE_TAG_TO_PULL="${{ needs.build-and-push-to-ghcr.outputs.image_tag }}"
             export GHCR_IMAGE_BASE_LOWERCASE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
             export IMAGE_TO_PULL_FULL_NAME="${GHCR_IMAGE_BASE_LOWERCASE}:${IMAGE_TAG_TO_PULL}"
@@ -84,7 +85,6 @@ jobs:
               --network ${DOCKER_NETWORK_NAME} \
               --restart unless-stopped \
               -p ${{ env.APP_CONTAINER_PORT }}:${{ env.APP_CONTAINER_PORT }} \
-              # 【关键修正】使用网络中真实的容器名称
               -e ELASTICSEARCHCONFIG_ADDRESSES="http://doer_elasticsearch:9200" \
               -e KAFKACONFIG_BROKERS="doer_kafka_broker1:9092,doer_kafka_broker2:9092" \
               ${IMAGE_TO_PULL_FULL_NAME}
@@ -96,7 +96,6 @@ jobs:
                 echo "✅ 容器已健康运行!"
                 break
               fi
-              # 如果容器不存在了（启动失败立即退出），则提前结束循环
               if [ "${HEALTH_STATUS}" == "not_found" ]; then
                 echo "❌ 错误: 容器未能启动或已退出。"
                 break
@@ -105,11 +104,9 @@ jobs:
               sleep 5
             done
             
-            # 最终确认健康状态
             FINAL_HEALTH_STATUS=$(docker inspect --format '{{.State.Health.Status}}' ${CONTAINER_NAME} || echo "not_found")
             if [ "${FINAL_HEALTH_STATUS}" != "healthy" ]; then
                 echo "❌ 部署失败: 容器未能在60秒内达到健康状态。"
-                # 打印日志以帮助排查
                 docker logs ${CONTAINER_NAME}
                 exit 1
             fi

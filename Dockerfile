@@ -2,7 +2,7 @@
 
 # ---- Builder Stage ----
 # 使用官方的 Go 镜像作为构建环境
-FROM golang:1.21-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # 设置必要的环境变量
 ENV CGO_ENABLED=0 GOOS=linux

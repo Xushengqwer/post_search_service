@@ -51,23 +51,7 @@ func main() {
 		log.Fatalf("致命错误: 加载配置文件 '%s' 失败: %v", configFile, err)
 	}
 
-	// 覆盖 Kafka Brokers
-	// 我们从环境变量 "KAFKACONFIG_BROKERS" 读取值
-	if kafkaBrokersEnv := os.Getenv("KAFKACONFIG_BROKERS"); kafkaBrokersEnv != "" {
-		// 如果环境变量不为空，则用逗号分割字符串，并覆盖 cfg 结构体中的值
-		cfg.KafkaConfig.Brokers = strings.Split(kafkaBrokersEnv, ",")
-		log.Printf("通过环境变量 KAFKACONFIG_BROKERS 覆盖了 Kafka Brokers: %v\n", cfg.KafkaConfig.Brokers)
-	}
-
-	// 覆盖 Elasticsearch Addresses
-	// 我们从环境变量 "ELASTICSEARCHCONFIG_ADDRESSES" 读取值
-	if esAddressesEnv := os.Getenv("ELASTICSEARCHCONFIG_ADDRESSES"); esAddressesEnv != "" {
-		// 如果环境变量不为空，则用逗号分割字符串，并覆盖 cfg 结构体中的值
-		cfg.ElasticsearchConfig.Addresses = strings.Split(esAddressesEnv, ",")
-		log.Printf("通过环境变量 ELASTICSEARCHCONFIG_ADDRESSES 覆盖了 Elasticsearch Addresses: %v\n", cfg.ElasticsearchConfig.Addresses)
-	}
-
-	// --- 【新增】打印最终配置以供调试 ---
+	// --- 打印最终配置以供调试 ---
 	configBytes, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		log.Fatalf("无法序列化最终配置以进行打印: %v", err)

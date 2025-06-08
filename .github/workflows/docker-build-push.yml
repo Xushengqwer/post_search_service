@@ -84,23 +84,32 @@ jobs:
               --network ${DOCKER_NETWORK_NAME} \
               --restart unless-stopped \
               -p ${{ env.APP_CONTAINER_PORT }}:${{ env.APP_CONTAINER_PORT }} \
-              -e ELASTICSEARCHCONFIG_ADDRESSES="http://elasticsearch:9200" \
-              -e KAFKACONFIG_BROKERS="kafka:9092" \
+              # 【关键修正】使用网络中真实的容器名称
+              -e ELASTICSEARCHCONFIG_ADDRESSES="http://doer_elasticsearch:9200" \
+              -e KAFKACONFIG_BROKERS="doer_kafka_broker1:9092,doer_kafka_broker2:9092" \
               ${IMAGE_TO_PULL_FULL_NAME}
 
             echo "==> 5. 检查容器健康状态..."
             for i in {1..12}; do
-              HEALTH_STATUS=$(docker inspect --format '{{.State.Health.Status}}' ${CONTAINER_NAME})
+              HEALTH_STATUS=$(docker inspect --format '{{.State.Health.Status}}' ${CONTAINER_NAME} || echo "not_found")
               if [ "${HEALTH_STATUS}" == "healthy" ]; then
                 echo "✅ 容器已健康运行!"
+                break
+              fi
+              # 如果容器不存在了（启动失败立即退出），则提前结束循环
+              if [ "${HEALTH_STATUS}" == "not_found" ]; then
+                echo "❌ 错误: 容器未能启动或已退出。"
                 break
               fi
               echo "等待容器健康... 当前状态: ${HEALTH_STATUS} (尝试次数 ${i}/12)"
               sleep 5
             done
             
-            if [ "$(docker inspect --format '{{.State.Health.Status}}' ${CONTAINER_NAME})" != "healthy" ]; then
+            # 最终确认健康状态
+            FINAL_HEALTH_STATUS=$(docker inspect --format '{{.State.Health.Status}}' ${CONTAINER_NAME} || echo "not_found")
+            if [ "${FINAL_HEALTH_STATUS}" != "healthy" ]; then
                 echo "❌ 部署失败: 容器未能在60秒内达到健康状态。"
+                # 打印日志以帮助排查
                 docker logs ${CONTAINER_NAME}
                 exit 1
             fi

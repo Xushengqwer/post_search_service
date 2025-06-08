@@ -25,7 +25,7 @@ RUN mkdir -p /app/config
 # 从 builder 阶段复制编译好的二进制文件
 COPY --from=builder /app/post_search_server /app/post_search_server
 
-# 【关键修正】复制本地的 config.development.yaml 并重命名为 config.yaml
+# 复制本地的 config.development.yaml 并重命名为 config.yaml
 COPY ./config/config.development.yaml /app/config/config.yaml
 
 WORKDIR /app

@@ -1,4 +1,4 @@
-# .github/workflows/your-workflow-name.yml (最终对齐版)
+# .github/workflows/your-workflow-name.yml (最终修正版)
 
 name: CI/CD for Post Search Service
 
@@ -13,38 +13,8 @@ env:
 jobs:
   build-and-push-to-ghcr:
     name: Build and Push Post Search to GHCR
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      image_tag: ${{ steps.meta.outputs.version }} # 定义输出，key 为 image_tag
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta # step 的 id 是 meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-      - name: Build and push Docker image to GHCR
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+    # ... (此部分无需改动，保持原样) ...
+    # ...
 
   deploy-to-cvm:
     name: Deploy Post Search Service to CVM
@@ -62,7 +32,6 @@ jobs:
           script: |
             set -e
             
-            # 【关键修正】确保这里引用的 outputs key 与上面定义的完全一致
             export IMAGE_TAG_TO_PULL="${{ needs.build-and-push-to-ghcr.outputs.image_tag }}"
             export GHCR_IMAGE_BASE_LOWERCASE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
             export IMAGE_TO_PULL_FULL_NAME="${GHCR_IMAGE_BASE_LOWERCASE}:${IMAGE_TAG_TO_PULL}"
@@ -85,8 +54,9 @@ jobs:
               --network ${DOCKER_NETWORK_NAME} \
               --restart unless-stopped \
               -p ${{ env.APP_CONTAINER_PORT }}:${{ env.APP_CONTAINER_PORT }} \
+              # 【最终关键修正】使用Kafka内部监听器的正确端口
               -e ELASTICSEARCHCONFIG_ADDRESSES="http://doer_elasticsearch:9200" \
-              -e KAFKACONFIG_BROKERS="doer_kafka_broker1:9092,doer_kafka_broker2:9092" \
+              -e KAFKACONFIG_BROKERS="doer_kafka_broker1:29092,doer_kafka_broker2:29093" \
               ${IMAGE_TO_PULL_FULL_NAME}
 
             echo "==> 5. 检查容器健康状态..."

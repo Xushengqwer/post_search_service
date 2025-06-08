@@ -1,5 +1,3 @@
-# .github/workflows/docker-build-push.yml (最终修正格式版)
-
 name: CI/CD for Post Search Service
 
 on:
@@ -20,7 +18,6 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.version }}
 
-    # 【关键修正】确保 'steps' 和下面的内容有正确的缩进
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -90,7 +87,7 @@ jobs:
               --network ${DOCKER_NETWORK_NAME} \
               --restart unless-stopped \
               -p ${{ env.APP_CONTAINER_PORT }}:${{ env.APP_CONTAINER_PORT }} \
-              -e ELASTICSEARCHCONFIG_ADDRESSES="http://doer_elasticsearch:9002" \
+              -e ELASTICSEARCHCONFIG_ADDRESSES="http://doer_elasticsearch:9200" \
               -e KAFKACONFIG_BROKERS="doer_kafka_broker1:29092,doer_kafka_broker2:29093" \
               ${IMAGE_TO_PULL_FULL_NAME}
 

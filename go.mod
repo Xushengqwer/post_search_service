@@ -5,7 +5,7 @@ go 1.23.7
 require (
 	github.com/IBM/sarama v1.45.1
 	github.com/Xushengqwer/gateway v0.0.0-20250409183222-28beab8f7f5d
-	github.com/Xushengqwer/go-common v0.0.0-20250608151329-348d790722e3
+	github.com/Xushengqwer/go-common v0.0.0-20250609053903-e9d21127601b
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/elastic/go-elasticsearch/v8 v8.18.0
 	github.com/gin-gonic/gin v1.10.0
